@@ -1,0 +1,23 @@
+{
+  "five_hour": {
+    "utilization": 42.5,
+    "resets_at": "2030-01-01T05:00:00Z"
+  },
+  "seven_day": {
+    "utilization": 18.75,
+    "resets_at": "2030-01-07T00:00:00Z"
+  },
+  "limits": [
+    {
+      "kind": "weekly_scoped",
+      "percent": 64.0,
+      "resets_at": "2030-01-07T00:00:00Z",
+      "is_active": true,
+      "scope": { "model": { "display_name": "Opus" } }
+    }
+  ],
+  "spend": {
+    "used": { "amount_minor": 1234, "currency": "USD", "exponent": 2 },
+    "balance": { "amount_minor": 5000, "currency": "USD", "exponent": 2 }
+  }
+}
