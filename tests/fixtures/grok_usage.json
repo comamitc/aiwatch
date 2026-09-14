@@ -1,0 +1,18 @@
+{
+  "config": {
+    "creditUsagePercent": 18.25,
+    "currentPeriod": {
+      "type": "USAGE_PERIOD_TYPE_WEEKLY",
+      "start": "2030-01-01T00:00:00Z",
+      "end": "2030-01-08T00:00:00Z"
+    },
+    "productUsage": [
+      { "product": "GrokBuild", "usagePercent": 14.0 },
+      { "product": "Chat", "usagePercent": 4.25 }
+    ],
+    "onDemandCap": { "val": 5000 },
+    "onDemandUsed": { "val": 250 },
+    "prepaidBalance": { "val": 1000 },
+    "subscriptionTierDisplay": "SuperGrok"
+  }
+}
