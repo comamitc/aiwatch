@@ -83,6 +83,10 @@ pub fn read_secret_file(path: &Path) -> Result<Zeroizing<String>, ProviderError>
         .map_err(|_| ProviderError::Credentials(format!("could not read {}", path.display())))
 }
 
+pub fn credential_file(account: &AccountConfig) -> &Path {
+    account.credential_source.credentials()
+}
+
 pub fn parse_rfc3339(value: Option<&str>) -> Option<DateTime<Utc>> {
     value
         .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
@@ -117,6 +121,6 @@ pub(crate) fn synthetic_account(provider: Provider) -> AccountConfig {
         id: format!("{}:test", provider.key()),
         name: "test".to_string(),
         provider,
-        credentials: "unused.json".into(),
+        credential_source: crate::config::CredentialSource::File("unused.json".into()),
     }
 }

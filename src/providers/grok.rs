@@ -10,7 +10,10 @@ use crate::{
     model::{AccountSnapshot, DetailMetric, FetchHealth, UsageWindow},
 };
 
-use super::{ProviderError, classify_status, detect_cli_version, parse_rfc3339, read_secret_file};
+use super::{
+    ProviderError, classify_status, credential_file, detect_cli_version, parse_rfc3339,
+    read_secret_file,
+};
 
 const BILLING_URL: &str = "https://cli-chat-proxy.grok.com/v1/billing?format=credits";
 const FALLBACK_VERSION: &str = "0.2.112";
@@ -118,7 +121,7 @@ pub async fn fetch(
 }
 
 fn read_auth(account: &AccountConfig) -> Result<Auth, ProviderError> {
-    let body = read_secret_file(&account.credentials)?;
+    let body = read_secret_file(credential_file(account))?;
     let entries: BTreeMap<String, AuthEntry> = serde_json::from_str(body.as_str())
         .map_err(|_| ProviderError::Credentials("Grok credential file is not valid JSON".into()))?;
 

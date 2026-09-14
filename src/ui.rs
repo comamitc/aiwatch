@@ -128,7 +128,7 @@ fn render(frame: &mut Frame<'_>, snapshot: &DashboardSnapshot, state: &AppState,
 fn render_header(frame: &mut Frame<'_>, snapshot: &DashboardSnapshot, poll: Duration, area: Rect) {
     let title = Line::from(vec![
         Span::styled(
-            " limitwatch ",
+            " aiwatch ",
             Style::default()
                 .fg(Color::White)
                 .add_modifier(Modifier::BOLD),

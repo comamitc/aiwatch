@@ -6,7 +6,7 @@ use std::{
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
-use crate::model::Provider;
+use crate::{accounts, model::Provider};
 
 pub const MIN_POLL_INTERVAL_SECS: u64 = 60;
 pub const DEFAULT_POLL_INTERVAL_SECS: u64 = 60;
@@ -23,7 +23,25 @@ pub struct AccountConfig {
     pub id: String,
     pub name: String,
     pub provider: Provider,
-    pub credentials: PathBuf,
+    pub credential_source: CredentialSource,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CredentialSource {
+    File(PathBuf),
+    ManagedProfile {
+        profile: PathBuf,
+        credentials: PathBuf,
+    },
+}
+
+impl CredentialSource {
+    pub fn credentials(&self) -> &Path {
+        match self {
+            Self::File(path) => path,
+            Self::ManagedProfile { credentials, .. } => credentials,
+        }
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -54,7 +72,7 @@ impl AppConfig {
         let home = dirs::home_dir().context("could not determine the home directory")?;
         let config_path = path
             .map(Path::to_path_buf)
-            .unwrap_or_else(|| home.join(".config/limitwatch/config.toml"));
+            .unwrap_or_else(|| home.join(".config/aiwatch/config.toml"));
 
         let file = if config_path.exists() {
             let body = fs::read_to_string(&config_path)
@@ -80,32 +98,44 @@ impl AppConfig {
             .unwrap_or_else(|| {
                 dirs::data_local_dir()
                     .unwrap_or_else(|| home.join(".local/share"))
-                    .join("limitwatch/history.sqlite3")
+                    .join("aiwatch/history.sqlite3")
             });
 
-        let accounts = if file.accounts.is_empty() {
-            discover_accounts(&home)
-        } else {
-            file.accounts
-                .into_iter()
-                .filter(|account| account.enabled)
-                .enumerate()
-                .map(|(index, account)| {
-                    let credentials = expand_home(&home, account.credentials);
-                    AccountConfig {
-                        id: format!("{}:{index}:{}", account.provider.key(), account.name),
-                        name: account.name,
-                        provider: account.provider,
-                        credentials,
-                    }
-                })
-                .collect()
-        };
+        let mut configured_accounts = file
+            .accounts
+            .into_iter()
+            .filter(|account| account.enabled)
+            .enumerate()
+            .map(|(index, account)| {
+                let credentials = expand_home(&home, account.credentials);
+                AccountConfig {
+                    id: format!(
+                        "{}:configured:{index}:{}",
+                        account.provider.key(),
+                        account.name
+                    ),
+                    name: account.name,
+                    provider: account.provider,
+                    credential_source: CredentialSource::File(credentials),
+                }
+            })
+            .collect::<Vec<_>>();
+
+        if configured_accounts.is_empty() {
+            configured_accounts.extend(discover_default_accounts(&home));
+        }
+        configured_accounts.extend(accounts::discover_managed_accounts(&home));
+        configured_accounts.sort_by(|left, right| {
+            left.provider
+                .cmp(&right.provider)
+                .then(left.name.cmp(&right.name))
+        });
+        configured_accounts.dedup_by(|left, right| left.id == right.id);
 
         Ok(Self {
             poll_interval_secs,
             history_path,
-            accounts,
+            accounts: configured_accounts,
         })
     }
 
@@ -117,7 +147,7 @@ impl AppConfig {
     }
 }
 
-fn discover_accounts(home: &Path) -> Vec<AccountConfig> {
+fn discover_default_accounts(home: &Path) -> Vec<AccountConfig> {
     let grok_path = env::var_os("GROK_AUTH_PATH")
         .map(PathBuf::from)
         .or_else(|| env::var_os("GROK_HOME").map(|path| PathBuf::from(path).join("auth.json")))
@@ -134,7 +164,7 @@ fn discover_accounts(home: &Path) -> Vec<AccountConfig> {
         id: format!("{}:default", provider.key()),
         name: "default".to_string(),
         provider,
-        credentials,
+        credential_source: CredentialSource::File(credentials),
     })
     .collect()
 }

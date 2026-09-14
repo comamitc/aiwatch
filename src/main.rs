@@ -1,9 +1,7 @@
-use std::{path::PathBuf, time::Duration};
+use std::{ffi::OsString, path::PathBuf, time::Duration};
 
-use anyhow::{Result, bail};
-use clap::Parser;
-use crossterm::terminal;
-use limitwatch::{
+use aiwatch::{
+    accounts::AccountManager,
     config::AppConfig,
     demo,
     model::{DashboardSnapshot, Provider},
@@ -11,11 +9,17 @@ use limitwatch::{
     poller::{PollCoordinator, loading_snapshot},
     ui,
 };
+use anyhow::{Result, bail};
+use clap::{Parser, Subcommand};
+use crossterm::terminal;
 use tokio::sync::{mpsc, watch};
 
 #[derive(Debug, Parser)]
 #[command(version, about)]
 struct Cli {
+    #[command(subcommand)]
+    command: Option<Commands>,
+
     /// Print one static snapshot and exit.
     #[arg(long)]
     once: bool,
@@ -45,9 +49,38 @@ struct Cli {
     no_history: bool,
 }
 
+#[derive(Debug, Subcommand)]
+enum Commands {
+    /// Create, authenticate, launch, and list isolated provider accounts.
+    Account {
+        #[command(subcommand)]
+        command: AccountCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum AccountCommand {
+    /// Create an isolated account and run the provider login flow.
+    Add { provider: Provider, name: String },
+    /// Re-run login for an existing isolated account.
+    Login { provider: Provider, name: String },
+    /// Launch the provider CLI inside an isolated account.
+    Run {
+        provider: Provider,
+        name: String,
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<OsString>,
+    },
+    /// List isolated accounts managed by aiwatch.
+    List,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    if let Some(Commands::Account { command }) = &cli.command {
+        return run_account_command(command);
+    }
 
     if cli.demo {
         let mut snapshot = demo::snapshot();
@@ -63,7 +96,7 @@ async fn main() -> Result<()> {
     config.retain_providers(&cli.provider);
     if config.accounts.is_empty() {
         bail!(
-            "no provider credentials discovered; log in with claude, codex, or grok, or configure account credential paths in ~/.config/limitwatch/config.toml"
+            "no provider credentials discovered; run `aiwatch account add <provider> <name>` or configure account credential paths in ~/.config/aiwatch/config.toml"
         );
     }
 
@@ -88,6 +121,38 @@ async fn main() -> Result<()> {
     let result = ui::run(snapshot_rx, refresh_tx, poll_interval).await;
     poller.abort();
     result
+}
+
+fn run_account_command(command: &AccountCommand) -> Result<()> {
+    let manager = AccountManager::new()?;
+    match command {
+        AccountCommand::Add { provider, name } => {
+            manager.add(*provider, name)?;
+            println!("Added {provider} account '{name}'.");
+        }
+        AccountCommand::Login { provider, name } => {
+            manager.login(*provider, name)?;
+            println!("Authenticated {provider} account '{name}'.");
+        }
+        AccountCommand::Run {
+            provider,
+            name,
+            args,
+        } => {
+            manager.launch(*provider, name, args)?;
+        }
+        AccountCommand::List => {
+            let accounts = manager.managed_accounts();
+            if accounts.is_empty() {
+                println!("No managed accounts.");
+            } else {
+                for account in accounts {
+                    println!("{}\t{}", account.provider, account.name);
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 async fn present_demo(snapshot: DashboardSnapshot, cli: &Cli) -> Result<()> {

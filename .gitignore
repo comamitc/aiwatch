@@ -4,6 +4,8 @@
 .env.*
 auth.json
 .credentials.json
+.oauth_refresh.lock
+/accounts/
 *.pem
 *.key
 *.sqlite
