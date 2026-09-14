@@ -8,14 +8,14 @@ Early public release. The quota endpoints used by the official clients are not p
 
 ## Features
 
-- Interactive terminal dashboard built with Rust and `ratatui`
+- Focused account cards with full-width usage bars and keyboard navigation
 - Claude five-hour, weekly, and model-scoped weekly windows
 - Codex primary five-hour and secondary weekly windows
 - Grok weekly or monthly included allowance and product breakdown
 - Multiple independently authenticated Claude Code, Codex, and Grok accounts
 - Multiple named accounts through explicit credential-file paths
 - Independent provider errors, authentication states, and stale data
-- SQLite-backed seven-day daily-peak sparklines
+- SQLite-backed seven-day daily-peak charts
 - Static text and JSON output for scripts and status lines
 - No telemetry, hosted service, credential copying, or automatic token refresh
 
@@ -52,9 +52,10 @@ Interactive keys:
 | --- | --- |
 | `q` or `Ctrl-C` | Quit |
 | `r` | Refresh when the provider-safe interval is due |
-| `0` | Show all providers |
-| `1`, `2`, `3` | Show Claude, Codex, or Grok |
-| `j` / `k` or arrows | Scroll |
+| `0` | Include accounts from all providers |
+| `1`, `2`, `3` | Include only Claude, Codex, or Grok accounts |
+| `j` / `k` or left/right arrows | Select the next or previous account |
+| Up/down arrows or Page Up/Page Down | Scroll the focused card |
 | `w` | Toggle weekly-only view |
 
 ## Multiple accounts
