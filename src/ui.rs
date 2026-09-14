@@ -379,15 +379,15 @@ fn account_lines(account: &AccountSnapshot, width: usize, weekly_only: bool) -> 
     for window in windows {
         lines.push(window_line(window, width));
         if window.history.iter().any(|value| *value > 0) {
-            lines.push(Line::from(Span::styled(
-                "  │",
-                Style::default().fg(Color::DarkGray),
-            )));
             lines.push(Line::from(vec![
                 Span::raw("  │   7D PEAK   "),
                 Span::styled(trend(window), Style::default().fg(Color::Green)),
                 Span::styled("  local daily peaks", Style::default().fg(Color::DarkGray)),
             ]));
+            lines.push(Line::from(Span::styled(
+                "  │",
+                Style::default().fg(Color::DarkGray),
+            )));
         }
     }
     if account.windows.is_empty() {
