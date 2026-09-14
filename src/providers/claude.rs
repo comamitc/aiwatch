@@ -161,12 +161,12 @@ fn read_auth(account: &AccountConfig) -> Result<Auth, ProviderError> {
 }
 
 fn read_managed_credentials(
-    profile: &std::path::Path,
+    _profile: &std::path::Path,
     credentials: &std::path::Path,
 ) -> Result<Zeroizing<String>, ProviderError> {
     #[cfg(target_os = "macos")]
     {
-        let service = claude_keychain_service(profile);
+        let service = claude_keychain_service(_profile);
         let account = std::env::var("USER").or_else(|_| std::env::var("LOGNAME"));
         if let Ok(account) = account {
             if let Ok(bytes) =
