@@ -10,7 +10,10 @@ use crate::{
     model::{AccountSnapshot, DetailMetric, FetchHealth, UsageWindow},
 };
 
-use super::{ProviderError, classify_status, detect_cli_version, read_secret_file, unix_timestamp};
+use super::{
+    ProviderError, classify_status, credential_file, detect_cli_version, read_secret_file,
+    unix_timestamp,
+};
 
 const USAGE_URL: &str = "https://chatgpt.com/backend-api/wham/usage";
 const FALLBACK_VERSION: &str = "0.142.5";
@@ -118,7 +121,7 @@ pub async fn fetch(
 }
 
 fn read_auth(account: &AccountConfig) -> Result<Auth, ProviderError> {
-    let body = read_secret_file(&account.credentials)?;
+    let body = read_secret_file(credential_file(account))?;
     let auth: AuthFile = serde_json::from_str(body.as_str()).map_err(|_| {
         ProviderError::Credentials("Codex credential file is not valid JSON".into())
     })?;

@@ -5,8 +5,10 @@ use reqwest::Client;
 use serde::Deserialize;
 use zeroize::Zeroizing;
 
+#[cfg(target_os = "macos")]
+use crate::accounts::claude_keychain_service;
 use crate::{
-    config::AccountConfig,
+    config::{AccountConfig, CredentialSource},
     model::{AccountSnapshot, DetailMetric, FetchHealth, UsageWindow},
 };
 
@@ -14,7 +16,7 @@ use super::{ProviderError, classify_status, detect_cli_version, parse_rfc3339, r
 
 const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
 const FALLBACK_VERSION: &str = "2.1.201";
-const LOGIN_HINT: &str = "run `claude auth login`";
+const LOGIN_HINT: &str = "run `aiwatch account login claude <name>` for a managed account or `claude auth login` for the default account";
 
 #[derive(Deserialize)]
 struct Credentials {
@@ -133,9 +135,15 @@ pub async fn fetch(
 }
 
 fn read_auth(account: &AccountConfig) -> Result<Auth, ProviderError> {
-    let body = read_secret_file(&account.credentials)?;
+    let body = match &account.credential_source {
+        CredentialSource::File(path) => read_secret_file(path)?,
+        CredentialSource::ManagedProfile {
+            profile,
+            credentials,
+        } => read_managed_credentials(profile, credentials)?,
+    };
     let credentials: Credentials = serde_json::from_str(body.as_str()).map_err(|_| {
-        ProviderError::Credentials("Claude credential file is not valid JSON".into())
+        ProviderError::Credentials("Claude credential store is not valid JSON".into())
     })?;
     let oauth = credentials
         .oauth
@@ -150,6 +158,38 @@ fn read_auth(account: &AccountConfig) -> Result<Auth, ProviderError> {
         .or(oauth.subscription_type)
         .map(|value| prettify_plan(&value));
     Ok(Auth { token, plan })
+}
+
+fn read_managed_credentials(
+    _profile: &std::path::Path,
+    credentials: &std::path::Path,
+) -> Result<Zeroizing<String>, ProviderError> {
+    #[cfg(target_os = "macos")]
+    {
+        let service = claude_keychain_service(_profile);
+        let account = std::env::var("USER").or_else(|_| std::env::var("LOGNAME"));
+        if let Ok(account) = account {
+            if let Ok(bytes) =
+                security_framework::passwords::get_generic_password(&service, &account)
+            {
+                if std::str::from_utf8(&bytes).is_ok() {
+                    let body =
+                        String::from_utf8(bytes).expect("credential bytes were validated as UTF-8");
+                    return Ok(Zeroizing::new(body));
+                }
+                let _bytes = Zeroizing::new(bytes);
+                return Err(ProviderError::Credentials(
+                    "managed Claude credentials are not valid UTF-8".into(),
+                ));
+            }
+        }
+    }
+
+    read_secret_file(credentials).map_err(|_| {
+        ProviderError::Credentials(
+            "managed Claude credentials are unavailable; run the account login command".into(),
+        )
+    })
 }
 
 fn map_usage(

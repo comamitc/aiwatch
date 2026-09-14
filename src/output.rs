@@ -8,7 +8,7 @@ pub fn render_text(snapshot: &DashboardSnapshot, width: usize) -> String {
     let mut output = String::new();
     let _ = writeln!(
         output,
-        "limitwatch {} accounts · {} providers · {}",
+        "aiwatch {} accounts · {} providers · {}",
         snapshot.accounts.len(),
         snapshot.provider_count(),
         snapshot
