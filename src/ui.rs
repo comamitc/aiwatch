@@ -23,6 +23,16 @@ use crate::{
     output::{format_reset, health_text, trend},
 };
 
+const TERMINAL_BACKGROUND: Color = Color::Reset;
+const TERMINAL_FOREGROUND: Color = Color::Reset;
+const TERMINAL_MUTED: Color = Color::DarkGray;
+const TERMINAL_INFO: Color = Color::LightCyan;
+const TERMINAL_SUCCESS: Color = Color::LightGreen;
+const TERMINAL_WARNING: Color = Color::Yellow;
+const TERMINAL_ACCENT: Color = Color::LightMagenta;
+const TERMINAL_SECONDARY: Color = Color::Magenta;
+const TERMINAL_DANGER: Color = Color::LightRed;
+
 struct AppState {
     provider: Option<Provider>,
     weekly_only: bool,
@@ -111,6 +121,14 @@ pub async fn run(
 
 fn render(frame: &mut Frame<'_>, snapshot: &DashboardSnapshot, state: &AppState, poll: Duration) {
     let area = frame.area();
+    frame.render_widget(
+        Block::default().style(
+            Style::default()
+                .fg(TERMINAL_FOREGROUND)
+                .bg(TERMINAL_BACKGROUND),
+        ),
+        area,
+    );
     let [header, summary, body, footer] = Layout::vertical([
         Constraint::Length(2),
         Constraint::Length(3),
@@ -130,12 +148,12 @@ fn render_header(frame: &mut Frame<'_>, snapshot: &DashboardSnapshot, poll: Dura
         Span::styled(
             " aiwatch ",
             Style::default()
-                .fg(Color::White)
+                .fg(TERMINAL_ACCENT)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
             env!("CARGO_PKG_VERSION"),
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(TERMINAL_SECONDARY),
         ),
         Span::styled(
             format!(
@@ -144,7 +162,7 @@ fn render_header(frame: &mut Frame<'_>, snapshot: &DashboardSnapshot, poll: Dura
                 snapshot.provider_count(),
                 poll.as_secs()
             ),
-            Style::default().fg(Color::Gray),
+            Style::default().fg(TERMINAL_MUTED),
         ),
     ]);
     let clock = Local::now().format("%H:%M:%S").to_string();
@@ -152,7 +170,7 @@ fn render_header(frame: &mut Frame<'_>, snapshot: &DashboardSnapshot, poll: Dura
         Layout::horizontal([Constraint::Min(20), Constraint::Length(12)]).areas(area);
     frame.render_widget(
         Paragraph::new(title)
-            .style(Style::default().bg(Color::Rgb(18, 28, 25)))
+            .style(Style::default().fg(TERMINAL_MUTED).bg(TERMINAL_BACKGROUND))
             .block(Block::default().borders(Borders::BOTTOM)),
         left,
     );
@@ -161,8 +179,8 @@ fn render_header(frame: &mut Frame<'_>, snapshot: &DashboardSnapshot, poll: Dura
             .right_aligned()
             .style(
                 Style::default()
-                    .fg(Color::LightGreen)
-                    .bg(Color::Rgb(18, 28, 25)),
+                    .fg(TERMINAL_SUCCESS)
+                    .bg(TERMINAL_BACKGROUND),
             )
             .block(Block::default().borders(Borders::BOTTOM)),
         right,
@@ -183,18 +201,18 @@ fn render_summary(frame: &mut Frame<'_>, snapshot: &DashboardSnapshot, area: Rec
         accounts,
         "ACCOUNTS",
         snapshot.accounts.len().to_string(),
-        Color::White,
+        TERMINAL_SECONDARY,
     );
     summary_box(
         frame,
         providers,
         "PROVIDERS",
         snapshot.provider_count().to_string(),
-        Color::White,
+        TERMINAL_INFO,
     );
 
     let (nearest_value, nearest_color) = snapshot.nearest_limit().map_or_else(
-        || ("waiting for quota data".to_string(), Color::DarkGray),
+        || ("waiting for quota data".to_string(), TERMINAL_MUTED),
         |(account, window)| {
             (
                 format!(
@@ -234,9 +252,9 @@ fn render_summary(frame: &mut Frame<'_>, snapshot: &DashboardSnapshot, area: Rec
         "LAST POLL",
         age,
         if ok == snapshot.accounts.len() {
-            Color::LightGreen
+            TERMINAL_SUCCESS
         } else {
-            Color::Yellow
+            TERMINAL_WARNING
         },
     );
 }
@@ -247,11 +265,19 @@ fn summary_box(frame: &mut Frame<'_>, area: Rect, title: &str, value: String, co
             value,
             Style::default().fg(color).add_modifier(Modifier::BOLD),
         )))
-        .block(Block::bordered().title(Span::styled(
-            format!(" {title} "),
-            Style::default().fg(Color::DarkGray),
-        )))
-        .style(Style::default().bg(Color::Rgb(8, 12, 11))),
+        .block(
+            Block::bordered()
+                .border_style(Style::default().fg(TERMINAL_MUTED))
+                .title(Span::styled(
+                    format!(" {title} "),
+                    Style::default().fg(TERMINAL_MUTED),
+                )),
+        )
+        .style(
+            Style::default()
+                .fg(TERMINAL_FOREGROUND)
+                .bg(TERMINAL_BACKGROUND),
+        ),
         area,
     );
 }
@@ -276,14 +302,23 @@ fn render_body(frame: &mut Frame<'_>, snapshot: &DashboardSnapshot, state: &AppS
     if lines.is_empty() {
         lines.push(Line::from(Span::styled(
             "No matching accounts. Configure credential paths or clear the provider filter.",
-            Style::default().fg(Color::Yellow),
+            Style::default().fg(TERMINAL_WARNING),
         )));
     }
 
     frame.render_widget(
         Paragraph::new(lines)
+            .style(
+                Style::default()
+                    .fg(TERMINAL_FOREGROUND)
+                    .bg(TERMINAL_BACKGROUND),
+            )
             .scroll((state.scroll, 0))
-            .block(Block::default().borders(Borders::LEFT | Borders::RIGHT)),
+            .block(
+                Block::default()
+                    .borders(Borders::LEFT | Borders::RIGHT)
+                    .border_style(Style::default().fg(TERMINAL_MUTED)),
+            ),
         area,
     );
 }
@@ -299,7 +334,7 @@ fn provider_line(provider: Provider, accounts: &[&AccountSnapshot]) -> Line<'sta
         .iter()
         .flat_map(|account| account.windows.iter().map(move |window| (*account, window)))
         .max_by(|(_, left), (_, right)| left.used_percent.total_cmp(&right.used_percent));
-    let color = nearest.map_or(Color::LightGreen, |(_, window)| {
+    let color = nearest.map_or(TERMINAL_SUCCESS, |(_, window)| {
         usage_color(window.used_percent)
     });
     let mut right = String::new();
@@ -327,7 +362,7 @@ fn provider_line(provider: Provider, accounts: &[&AccountSnapshot]) -> Line<'sta
                 if accounts.len() == 1 { "" } else { "s" }
             ),
             Style::default()
-                .fg(Color::White)
+                .fg(TERMINAL_FOREGROUND)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
@@ -343,10 +378,10 @@ fn provider_line(provider: Provider, accounts: &[&AccountSnapshot]) -> Line<'sta
 
 fn account_lines(account: &AccountSnapshot, width: usize, weekly_only: bool) -> Vec<Line<'static>> {
     let status_color = match account.health.state {
-        HealthState::Ok => Color::LightGreen,
-        HealthState::Stale => Color::Yellow,
+        HealthState::Ok => TERMINAL_SUCCESS,
+        HealthState::Stale => TERMINAL_WARNING,
         HealthState::AuthenticationRequired | HealthState::RateLimited | HealthState::Error => {
-            Color::LightRed
+            TERMINAL_DANGER
         }
     };
     let plan = account
@@ -355,15 +390,15 @@ fn account_lines(account: &AccountSnapshot, width: usize, weekly_only: bool) -> 
         .map(|plan| format!("  {plan}"))
         .unwrap_or_default();
     let mut lines = vec![Line::from(vec![
-        Span::styled("  ╭─", Style::default().fg(Color::DarkGray)),
+        Span::styled("  ╭─", Style::default().fg(TERMINAL_MUTED)),
         Span::styled("● ", Style::default().fg(status_color)),
         Span::styled(
             account.name.clone(),
             Style::default()
-                .fg(Color::White)
+                .fg(TERMINAL_FOREGROUND)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(plan, Style::default().fg(Color::Gray)),
+        Span::styled(plan, Style::default().fg(TERMINAL_MUTED)),
         Span::styled(
             format!(
                 "  ·  {}",
@@ -381,12 +416,12 @@ fn account_lines(account: &AccountSnapshot, width: usize, weekly_only: bool) -> 
         if window.history.iter().any(|value| *value > 0) {
             lines.push(Line::from(vec![
                 Span::raw("  │   7D PEAK   "),
-                Span::styled(trend(window), Style::default().fg(Color::Green)),
-                Span::styled("  local daily peaks", Style::default().fg(Color::DarkGray)),
+                Span::styled(trend(window), Style::default().fg(TERMINAL_INFO)),
+                Span::styled("  local daily peaks", Style::default().fg(TERMINAL_MUTED)),
             ]));
             lines.push(Line::from(Span::styled(
                 "  │",
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(TERMINAL_MUTED),
             )));
         }
     }
@@ -412,12 +447,12 @@ fn account_lines(account: &AccountSnapshot, width: usize, weekly_only: bool) -> 
             .join(" · ");
         lines.push(Line::from(Span::styled(
             format!("  │   {details}"),
-            Style::default().fg(Color::Gray),
+            Style::default().fg(TERMINAL_MUTED),
         )));
     }
     lines.push(Line::from(Span::styled(
         "  ╰─",
-        Style::default().fg(Color::DarkGray),
+        Style::default().fg(TERMINAL_MUTED),
     )));
     lines.push(Line::from(""));
     lines
@@ -429,7 +464,7 @@ fn window_line(window: &UsageWindow, width: usize) -> Line<'static> {
         return Line::from(vec![
             Span::styled(
                 format!("  │   {:<10}", window.label),
-                Style::default().fg(Color::Gray),
+                Style::default().fg(TERMINAL_MUTED),
             ),
             Span::styled(
                 format!("{:>6.1}% used", window.used_percent),
@@ -437,7 +472,7 @@ fn window_line(window: &UsageWindow, width: usize) -> Line<'static> {
             ),
             Span::styled(
                 format!("  {}", format_reset(window.resets_at)),
-                Style::default().fg(Color::Gray),
+                Style::default().fg(TERMINAL_MUTED),
             ),
         ]);
     }
@@ -447,12 +482,12 @@ fn window_line(window: &UsageWindow, width: usize) -> Line<'static> {
     Line::from(vec![
         Span::styled(
             format!("  │   {:<10}", window.label),
-            Style::default().fg(Color::Gray),
+            Style::default().fg(TERMINAL_MUTED),
         ),
         Span::styled("█".repeat(filled), Style::default().fg(color)),
         Span::styled(
-            "░".repeat(bar_width - filled),
-            Style::default().fg(Color::Rgb(30, 38, 36)),
+            pointillist_bar(bar_width - filled),
+            Style::default().fg(TERMINAL_MUTED),
         ),
         Span::styled(
             format!("  {:>6.1}% used", window.used_percent),
@@ -460,7 +495,7 @@ fn window_line(window: &UsageWindow, width: usize) -> Line<'static> {
         ),
         Span::styled(
             format!("  {}", format_reset(window.resets_at)),
-            Style::default().fg(Color::Gray),
+            Style::default().fg(TERMINAL_MUTED),
         ),
     ])
 }
@@ -476,18 +511,30 @@ fn render_footer(frame: &mut Frame<'_>, state: &AppState, area: Rect) {
         Paragraph::new(format!(
             " q quit  r refresh when due  0-3 provider  j/k scroll  w weekly only  │  filter {filter} · {weekly}"
         ))
-        .style(Style::default().fg(Color::Gray).bg(Color::Rgb(18, 28, 25))),
+        .style(
+            Style::default()
+                .fg(TERMINAL_MUTED)
+                .bg(TERMINAL_BACKGROUND),
+        ),
         area,
     );
 }
 
+fn pointillist_bar(width: usize) -> String {
+    let mut bar = "⠂⠄".repeat(width / 2);
+    if width % 2 == 1 {
+        bar.push('⠂');
+    }
+    bar
+}
+
 fn usage_color(percent: f64) -> Color {
     if percent >= 90.0 {
-        Color::LightRed
+        TERMINAL_DANGER
     } else if percent >= 70.0 {
-        Color::Yellow
+        TERMINAL_WARNING
     } else {
-        Color::LightGreen
+        TERMINAL_SUCCESS
     }
 }
 
