@@ -112,8 +112,8 @@ pub async fn run(
 fn render(frame: &mut Frame<'_>, snapshot: &DashboardSnapshot, state: &AppState, poll: Duration) {
     let area = frame.area();
     let [header, summary, body, footer] = Layout::vertical([
+        Constraint::Length(2),
         Constraint::Length(3),
-        Constraint::Length(5),
         Constraint::Min(4),
         Constraint::Length(1),
     ])
@@ -355,7 +355,8 @@ fn account_lines(account: &AccountSnapshot, width: usize, weekly_only: bool) -> 
         .map(|plan| format!("  {plan}"))
         .unwrap_or_default();
     let mut lines = vec![Line::from(vec![
-        Span::styled("  ● ", Style::default().fg(status_color)),
+        Span::styled("  ╭─", Style::default().fg(Color::DarkGray)),
+        Span::styled("● ", Style::default().fg(status_color)),
         Span::styled(
             account.name.clone(),
             Style::default()
@@ -379,7 +380,7 @@ fn account_lines(account: &AccountSnapshot, width: usize, weekly_only: bool) -> 
         lines.push(window_line(window, width));
         if window.history.iter().any(|value| *value > 0) {
             lines.push(Line::from(vec![
-                Span::raw("      7D        "),
+                Span::raw("  │   7D        "),
                 Span::styled(trend(window), Style::default().fg(Color::Green)),
                 Span::styled("  local daily peaks", Style::default().fg(Color::DarkGray)),
             ]));
@@ -388,7 +389,7 @@ fn account_lines(account: &AccountSnapshot, width: usize, weekly_only: bool) -> 
     if account.windows.is_empty() {
         lines.push(Line::from(Span::styled(
             format!(
-                "      {}",
+                "  │   {}",
                 account
                     .health
                     .message
@@ -406,10 +407,14 @@ fn account_lines(account: &AccountSnapshot, width: usize, weekly_only: bool) -> 
             .collect::<Vec<_>>()
             .join(" · ");
         lines.push(Line::from(Span::styled(
-            format!("      {details}"),
+            format!("  │   {details}"),
             Style::default().fg(Color::Gray),
         )));
     }
+    lines.push(Line::from(Span::styled(
+        "  ╰─",
+        Style::default().fg(Color::DarkGray),
+    )));
     lines.push(Line::from(""));
     lines
 }
@@ -419,7 +424,7 @@ fn window_line(window: &UsageWindow, width: usize) -> Line<'static> {
     if width < 68 {
         return Line::from(vec![
             Span::styled(
-                format!("      {:<10}", window.label),
+                format!("  │   {:<10}", window.label),
                 Style::default().fg(Color::Gray),
             ),
             Span::styled(
@@ -437,7 +442,7 @@ fn window_line(window: &UsageWindow, width: usize) -> Line<'static> {
     let filled = ((window.used_percent / 100.0) * bar_width as f64).round() as usize;
     Line::from(vec![
         Span::styled(
-            format!("      {:<10}", window.label),
+            format!("  │   {:<10}", window.label),
             Style::default().fg(Color::Gray),
         ),
         Span::styled("█".repeat(filled), Style::default().fg(color)),
