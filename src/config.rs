@@ -121,10 +121,11 @@ impl AppConfig {
             })
             .collect::<Vec<_>>();
 
+        let managed_accounts = accounts::discover_managed_accounts(&home);
         if configured_accounts.is_empty() {
-            configured_accounts.extend(discover_default_accounts(&home));
+            configured_accounts.extend(discover_default_accounts(&home, &managed_accounts));
         }
-        configured_accounts.extend(accounts::discover_managed_accounts(&home));
+        configured_accounts.extend(managed_accounts);
         configured_accounts.sort_by(|left, right| {
             left.provider
                 .cmp(&right.provider)
@@ -147,7 +148,10 @@ impl AppConfig {
     }
 }
 
-fn discover_default_accounts(home: &Path) -> Vec<AccountConfig> {
+fn discover_default_accounts(
+    home: &Path,
+    managed_accounts: &[AccountConfig],
+) -> Vec<AccountConfig> {
     let grok_path = env::var_os("GROK_AUTH_PATH")
         .map(PathBuf::from)
         .or_else(|| env::var_os("GROK_HOME").map(|path| PathBuf::from(path).join("auth.json")))
@@ -159,7 +163,12 @@ fn discover_default_accounts(home: &Path) -> Vec<AccountConfig> {
         (Provider::Grok, grok_path),
     ]
     .into_iter()
-    .filter(|(_, path)| path.is_file())
+    .filter(|(provider, path)| {
+        path.is_file()
+            && !managed_accounts
+                .iter()
+                .any(|account| account.provider == *provider)
+    })
     .map(|(provider, credentials)| AccountConfig {
         id: format!("{}:default", provider.key()),
         name: "default".to_string(),
@@ -184,6 +193,8 @@ fn expand_home(home: &Path, path: PathBuf) -> PathBuf {
 mod tests {
     use super::*;
 
+    use tempfile::tempdir;
+
     #[test]
     fn expands_tilde_paths() {
         let home = Path::new("/home/tester");
@@ -194,6 +205,39 @@ mod tests {
         assert_eq!(
             expand_home(home, PathBuf::from("/tmp/auth.json")),
             PathBuf::from("/tmp/auth.json")
+        );
+    }
+
+    #[test]
+    fn managed_profile_replaces_default_for_only_its_provider() {
+        let temp = tempdir().unwrap();
+        fs::create_dir_all(temp.path().join(".claude")).unwrap();
+        fs::create_dir_all(temp.path().join(".codex")).unwrap();
+        fs::write(temp.path().join(".claude/.credentials.json"), "{}").unwrap();
+        fs::write(temp.path().join(".codex/auth.json"), "{}").unwrap();
+        let managed = vec![AccountConfig {
+            id: "claude:managed:personal".to_string(),
+            name: "personal".to_string(),
+            provider: Provider::Claude,
+            credential_source: CredentialSource::ManagedProfile {
+                profile: temp.path().join("managed/claude/personal"),
+                credentials: temp
+                    .path()
+                    .join("managed/claude/personal/.credentials.json"),
+            },
+        }];
+
+        let defaults = discover_default_accounts(temp.path(), &managed);
+
+        assert!(
+            defaults
+                .iter()
+                .all(|account| account.provider != Provider::Claude)
+        );
+        assert!(
+            defaults
+                .iter()
+                .any(|account| account.provider == Provider::Codex)
         );
     }
 }
