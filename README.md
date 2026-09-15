@@ -8,7 +8,7 @@ Early public release. The quota endpoints used by the official clients are not p
 
 ## Features
 
-- Focused account cards with full-width usage bars and keyboard navigation
+- All-account summary dashboard with an optional focused account view
 - Claude five-hour, weekly, and model-scoped weekly windows
 - Codex primary five-hour and secondary weekly windows
 - Grok weekly or monthly included allowance and product breakdown
@@ -54,8 +54,10 @@ Interactive keys:
 | `r` | Refresh when the provider-safe interval is due |
 | `0` | Include accounts from all providers |
 | `1`, `2`, `3` | Include only Claude, Codex, or Grok accounts |
-| `j` / `k` or left/right arrows | Select the next or previous account |
-| Up/down arrows or Page Up/Page Down | Scroll the focused card |
+| `Tab` or `v` | Switch between the all-account summary and focused account view |
+| `j` / `k` | Scroll the summary or select the next/previous focused account |
+| Left/right arrows | Select the next/previous account in focused view |
+| Up/down arrows or Page Up/Page Down | Scroll the current view |
 | `w` | Toggle weekly-only view |
 
 ## Multiple accounts
