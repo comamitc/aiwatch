@@ -20,7 +20,7 @@ use tokio::sync::{mpsc, watch};
 
 use crate::{
     model::{AccountSnapshot, DashboardSnapshot, HealthState, Provider, UsageWindow},
-    output::{format_reset, health_text},
+    output::{format_reset, health_text, trend},
 };
 
 const TERMINAL_BACKGROUND: Color = Color::Reset;
@@ -33,9 +33,16 @@ const TERMINAL_ACCENT: Color = Color::LightMagenta;
 const TERMINAL_SECONDARY: Color = Color::Magenta;
 const TERMINAL_DANGER: Color = Color::LightRed;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ViewMode {
+    Summary,
+    Focused,
+}
+
 struct AppState {
     provider: Option<Provider>,
     weekly_only: bool,
+    view: ViewMode,
     selected_account: usize,
     scroll: u16,
 }
@@ -45,6 +52,7 @@ impl AppState {
         Self {
             provider: None,
             weekly_only: false,
+            view: ViewMode::Summary,
             selected_account: 0,
             scroll: 0,
         }
@@ -53,6 +61,19 @@ impl AppState {
     fn select_provider(&mut self, provider: Option<Provider>) {
         self.provider = provider;
         self.selected_account = 0;
+        self.scroll = 0;
+    }
+
+    fn toggle_view(&mut self) {
+        self.view = match self.view {
+            ViewMode::Summary => ViewMode::Focused,
+            ViewMode::Focused => ViewMode::Summary,
+        };
+        self.scroll = 0;
+    }
+
+    fn show_summary(&mut self) {
+        self.view = ViewMode::Summary;
         self.scroll = 0;
     }
 
@@ -127,16 +148,24 @@ pub async fn run(
                         KeyCode::Char('2') => state.select_provider(Some(Provider::Codex)),
                         KeyCode::Char('3') => state.select_provider(Some(Provider::Grok)),
                         KeyCode::Char('w') => { state.weekly_only = !state.weekly_only; state.scroll = 0; }
-                        KeyCode::Char('j') | KeyCode::Right => {
+                        KeyCode::Tab | KeyCode::Char('v') => state.toggle_view(),
+                        KeyCode::Esc => state.show_summary(),
+                        KeyCode::Char('j') if state.view == ViewMode::Focused => {
                             state.next_account(matching_account_count(&snapshot, state.provider));
                         }
-                        KeyCode::Char('k') | KeyCode::Left => {
+                        KeyCode::Char('k') if state.view == ViewMode::Focused => {
                             state.previous_account(matching_account_count(&snapshot, state.provider));
                         }
-                        KeyCode::Down | KeyCode::PageDown => {
+                        KeyCode::Right if state.view == ViewMode::Focused => {
+                            state.next_account(matching_account_count(&snapshot, state.provider));
+                        }
+                        KeyCode::Left if state.view == ViewMode::Focused => {
+                            state.previous_account(matching_account_count(&snapshot, state.provider));
+                        }
+                        KeyCode::Char('j') | KeyCode::Down | KeyCode::PageDown => {
                             state.scroll = state.scroll.saturating_add(1);
                         }
-                        KeyCode::Up | KeyCode::PageUp => {
+                        KeyCode::Char('k') | KeyCode::Up | KeyCode::PageUp => {
                             state.scroll = state.scroll.saturating_sub(1);
                         }
                         _ => {}
@@ -159,16 +188,32 @@ fn render(frame: &mut Frame<'_>, snapshot: &DashboardSnapshot, state: &AppState,
         ),
         area,
     );
-    let [header, body, footer] = Layout::vertical([
-        Constraint::Length(2),
-        Constraint::Min(6),
-        Constraint::Length(1),
-    ])
-    .areas(area);
-
-    render_header(frame, snapshot, poll, header);
-    render_body(frame, snapshot, state, body);
-    render_footer(frame, state, footer);
+    match state.view {
+        ViewMode::Summary => {
+            let [header, summary, body, footer] = Layout::vertical([
+                Constraint::Length(2),
+                Constraint::Length(3),
+                Constraint::Min(4),
+                Constraint::Length(1),
+            ])
+            .areas(area);
+            render_header(frame, snapshot, poll, header);
+            render_summary(frame, snapshot, summary);
+            render_overview_body(frame, snapshot, state, body);
+            render_footer(frame, state, footer);
+        }
+        ViewMode::Focused => {
+            let [header, body, footer] = Layout::vertical([
+                Constraint::Length(2),
+                Constraint::Min(6),
+                Constraint::Length(1),
+            ])
+            .areas(area);
+            render_header(frame, snapshot, poll, header);
+            render_focused_body(frame, snapshot, state, body);
+            render_footer(frame, state, footer);
+        }
+    }
 }
 
 fn render_header(frame: &mut Frame<'_>, snapshot: &DashboardSnapshot, poll: Duration, area: Rect) {
@@ -215,7 +260,324 @@ fn render_header(frame: &mut Frame<'_>, snapshot: &DashboardSnapshot, poll: Dura
     );
 }
 
-fn render_body(frame: &mut Frame<'_>, snapshot: &DashboardSnapshot, state: &AppState, area: Rect) {
+fn render_summary(frame: &mut Frame<'_>, snapshot: &DashboardSnapshot, area: Rect) {
+    let [accounts, providers, nearest, poll] = Layout::horizontal([
+        Constraint::Percentage(20),
+        Constraint::Percentage(20),
+        Constraint::Percentage(35),
+        Constraint::Percentage(25),
+    ])
+    .areas(area);
+
+    summary_box(
+        frame,
+        accounts,
+        "ACCOUNTS",
+        snapshot.accounts.len().to_string(),
+        TERMINAL_SECONDARY,
+    );
+    summary_box(
+        frame,
+        providers,
+        "PROVIDERS",
+        snapshot.provider_count().to_string(),
+        TERMINAL_INFO,
+    );
+
+    let (nearest_value, nearest_color) = snapshot.nearest_limit().map_or_else(
+        || ("waiting for quota data".to_string(), TERMINAL_MUTED),
+        |(account, window)| {
+            (
+                format!(
+                    "{}/{} {} · {:.1}% left",
+                    account.provider,
+                    account.name,
+                    window.label,
+                    window.remaining_percent()
+                ),
+                usage_color(window.used_percent),
+            )
+        },
+    );
+    summary_box(frame, nearest, "NEAREST CAP", nearest_value, nearest_color);
+
+    let ok = snapshot
+        .accounts
+        .iter()
+        .filter(|account| account.health.state == HealthState::Ok)
+        .count();
+    let age = snapshot
+        .accounts
+        .iter()
+        .map(|account| account.fetched_at)
+        .max()
+        .map(|time| {
+            format!(
+                "{} · {ok}/{} ok",
+                age_text(Utc::now() - time),
+                snapshot.accounts.len()
+            )
+        })
+        .unwrap_or_else(|| "not polled".to_string());
+    summary_box(
+        frame,
+        poll,
+        "LAST POLL",
+        age,
+        if ok == snapshot.accounts.len() {
+            TERMINAL_SUCCESS
+        } else {
+            TERMINAL_WARNING
+        },
+    );
+}
+
+fn summary_box(frame: &mut Frame<'_>, area: Rect, title: &str, value: String, color: Color) {
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            value,
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        )))
+        .block(
+            Block::bordered()
+                .border_style(Style::default().fg(TERMINAL_MUTED))
+                .title(Span::styled(
+                    format!(" {title} "),
+                    Style::default().fg(TERMINAL_MUTED),
+                )),
+        )
+        .style(
+            Style::default()
+                .fg(TERMINAL_FOREGROUND)
+                .bg(TERMINAL_BACKGROUND),
+        ),
+        area,
+    );
+}
+
+fn render_overview_body(
+    frame: &mut Frame<'_>,
+    snapshot: &DashboardSnapshot,
+    state: &AppState,
+    area: Rect,
+) {
+    let width = area.width.saturating_sub(2) as usize;
+    let mut lines = Vec::new();
+    for provider in snapshot
+        .providers()
+        .filter(|provider| state.provider.is_none_or(|filter| filter == *provider))
+    {
+        let accounts = snapshot
+            .accounts
+            .iter()
+            .filter(|account| account.provider == provider)
+            .collect::<Vec<_>>();
+        lines.push(provider_line(provider, &accounts));
+        for account in accounts {
+            lines.extend(account_lines(account, width, state.weekly_only));
+        }
+    }
+    if lines.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "No matching accounts. Configure credentials or clear the provider filter.",
+            Style::default().fg(TERMINAL_WARNING),
+        )));
+    }
+
+    frame.render_widget(
+        Paragraph::new(lines)
+            .style(
+                Style::default()
+                    .fg(TERMINAL_FOREGROUND)
+                    .bg(TERMINAL_BACKGROUND),
+            )
+            .scroll((state.scroll, 0))
+            .block(
+                Block::default()
+                    .borders(Borders::LEFT | Borders::RIGHT)
+                    .border_style(Style::default().fg(TERMINAL_MUTED)),
+            ),
+        area,
+    );
+}
+
+fn provider_line(provider: Provider, accounts: &[&AccountSnapshot]) -> Line<'static> {
+    let highest_weekly = accounts
+        .iter()
+        .flat_map(|account| &account.windows)
+        .filter(|window| window.key.contains("weekly") || window.key.contains("monthly"))
+        .map(|window| window.used_percent)
+        .max_by(f64::total_cmp);
+    let nearest = accounts
+        .iter()
+        .flat_map(|account| account.windows.iter().map(move |window| (*account, window)))
+        .max_by(|(_, left), (_, right)| left.used_percent.total_cmp(&right.used_percent));
+    let color = nearest.map_or(TERMINAL_SUCCESS, |(_, window)| {
+        usage_color(window.used_percent)
+    });
+    let mut right = String::new();
+    if let Some(weekly) = highest_weekly {
+        right.push_str(&format!("highest weekly {weekly:.1}%"));
+    }
+    if let Some((account, window)) = nearest {
+        if !right.is_empty() {
+            right.push_str(" · ");
+        }
+        right.push_str(&format!(
+            "nearest {}/{} {:.1}% left",
+            account.name,
+            window.label,
+            window.remaining_percent()
+        ));
+    }
+    Line::from(vec![
+        Span::styled("● ", Style::default().fg(color)),
+        Span::styled(
+            format!(
+                "{}  {} account{}",
+                provider.label(),
+                accounts.len(),
+                if accounts.len() == 1 { "" } else { "s" }
+            ),
+            Style::default()
+                .fg(TERMINAL_FOREGROUND)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            if right.is_empty() {
+                String::new()
+            } else {
+                format!("  │  {right}")
+            },
+            Style::default().fg(color),
+        ),
+    ])
+}
+
+fn account_lines(account: &AccountSnapshot, width: usize, weekly_only: bool) -> Vec<Line<'static>> {
+    let status_color = health_color(account.health.state);
+    let plan = account
+        .plan
+        .as_deref()
+        .map(|plan| format!("  {plan}"))
+        .unwrap_or_default();
+    let mut lines = vec![Line::from(vec![
+        Span::styled("  ╭─", Style::default().fg(TERMINAL_MUTED)),
+        Span::styled("● ", Style::default().fg(status_color)),
+        Span::styled(
+            account.name.clone(),
+            Style::default()
+                .fg(TERMINAL_FOREGROUND)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(plan, Style::default().fg(TERMINAL_MUTED)),
+        Span::styled(
+            format!(
+                "  ·  {}",
+                health_text(account.health.state, account.health.status_code)
+            ),
+            Style::default().fg(status_color),
+        ),
+    ])];
+
+    let windows = account.windows.iter().filter(|window| {
+        !weekly_only || window.key.contains("weekly") || window.key.contains("monthly")
+    });
+    for window in windows {
+        lines.push(overview_window_line(window, width));
+        if window.history.iter().any(|value| *value > 0) {
+            lines.push(Line::from(vec![
+                Span::raw("  │   7D PEAK   "),
+                Span::styled(trend(window), Style::default().fg(TERMINAL_INFO)),
+                Span::styled("  local daily peaks", Style::default().fg(TERMINAL_MUTED)),
+            ]));
+            lines.push(Line::from(Span::styled(
+                "  │",
+                Style::default().fg(TERMINAL_MUTED),
+            )));
+        }
+    }
+    if account.windows.is_empty() {
+        lines.push(Line::from(Span::styled(
+            format!(
+                "  │   {}",
+                account
+                    .health
+                    .message
+                    .as_deref()
+                    .unwrap_or("quota unavailable")
+            ),
+            Style::default().fg(status_color),
+        )));
+    }
+    if !account.details.is_empty() {
+        let details = account
+            .details
+            .iter()
+            .map(|detail| format!("{} {}", detail.label, detail.value))
+            .collect::<Vec<_>>()
+            .join(" · ");
+        lines.push(Line::from(Span::styled(
+            format!("  │   {details}"),
+            Style::default().fg(TERMINAL_MUTED),
+        )));
+    }
+    lines.push(Line::from(Span::styled(
+        "  ╰─",
+        Style::default().fg(TERMINAL_MUTED),
+    )));
+    lines.push(Line::from(""));
+    lines
+}
+
+fn overview_window_line(window: &UsageWindow, width: usize) -> Line<'static> {
+    let color = usage_color(window.used_percent);
+    if width < 68 {
+        return Line::from(vec![
+            Span::styled(
+                format!("  │   {:<10}", window.label),
+                Style::default().fg(TERMINAL_MUTED),
+            ),
+            Span::styled(
+                format!("{:>6.1}% used", window.used_percent),
+                Style::default().fg(color),
+            ),
+            Span::styled(
+                format!("  {}", format_reset(window.resets_at)),
+                Style::default().fg(TERMINAL_MUTED),
+            ),
+        ]);
+    }
+
+    let bar_width = width.saturating_sub(52).clamp(12, 52);
+    let filled = ((window.used_percent / 100.0) * bar_width as f64).round() as usize;
+    Line::from(vec![
+        Span::styled(
+            format!("  │   {:<10}", window.label),
+            Style::default().fg(TERMINAL_MUTED),
+        ),
+        Span::styled("█".repeat(filled), Style::default().fg(color)),
+        Span::styled(
+            pointillist_bar(bar_width - filled),
+            Style::default().fg(TERMINAL_MUTED),
+        ),
+        Span::styled(
+            format!("  {:>6.1}% used", window.used_percent),
+            Style::default().fg(color),
+        ),
+        Span::styled(
+            format!("  {}", format_reset(window.resets_at)),
+            Style::default().fg(TERMINAL_MUTED),
+        ),
+    ])
+}
+
+fn render_focused_body(
+    frame: &mut Frame<'_>,
+    snapshot: &DashboardSnapshot,
+    state: &AppState,
+    area: Rect,
+) {
     let Some((index, count, account)) = selected_account(snapshot, state) else {
         frame.render_widget(
             Paragraph::new(
@@ -529,15 +891,17 @@ fn render_footer(frame: &mut Frame<'_>, state: &AppState, area: Rect) {
     } else {
         "all windows"
     };
+    let controls = match state.view {
+        ViewMode::Summary => {
+            " q quit  r refresh  j/k or ↑/↓ scroll  tab focused  0-3 provider  w weekly "
+        }
+        ViewMode::Focused => {
+            " q quit  r refresh  j/k or ←/→ account  ↑/↓ scroll  tab summary  0-3 provider  w weekly "
+        }
+    };
     frame.render_widget(
-        Paragraph::new(format!(
-            " q quit  r refresh  j/k or ←/→ account  ↑/↓ scroll  0-3 provider  w weekly  │  {filter} · {weekly}"
-        ))
-        .style(
-            Style::default()
-                .fg(TERMINAL_MUTED)
-                .bg(TERMINAL_BACKGROUND),
-        ),
+        Paragraph::new(format!("{controls} │  {filter} · {weekly}"))
+            .style(Style::default().fg(TERMINAL_MUTED).bg(TERMINAL_BACKGROUND)),
         area,
     );
 }
