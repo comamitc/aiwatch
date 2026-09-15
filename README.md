@@ -109,13 +109,15 @@ Provider API-key and token environment variables are removed from managed child 
 
 ## Default credentials
 
-Without managed or explicitly configured profiles, `aiwatch` discovers credential files maintained by the official CLIs:
+When a provider has no managed profile and no explicit account configuration is present, `aiwatch` discovers credentials maintained by the official CLI:
 
 | Provider | Default credential file |
 | --- | --- |
 | Claude Code | `~/.claude/.credentials.json` when present |
 | Codex | `~/.codex/auth.json` |
 | Grok | `~/.grok/auth.json` |
+
+A managed profile suppresses automatic discovery of that provider's `default` profile, preventing stale or duplicate credentials from appearing beside named accounts. Add the default credential path explicitly under a unique name if both profiles are intentional.
 
 Grok also respects `GROK_AUTH_PATH` and `GROK_HOME`. On macOS, use a managed Claude account because the default Claude login is normally stored in Keychain rather than `~/.claude/.credentials.json`.
 
