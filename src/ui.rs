@@ -536,7 +536,7 @@ fn overview_window_line(window: &UsageWindow, width: usize) -> Line<'static> {
         return Line::from(vec![
             Span::styled(
                 format!("  │   {:<10}", window.label),
-                Style::default().fg(TERMINAL_MUTED),
+                Style::default().fg(TERMINAL_WARNING),
             ),
             Span::styled(
                 format!("{:>6.1}% used", window.used_percent),
@@ -549,27 +549,25 @@ fn overview_window_line(window: &UsageWindow, width: usize) -> Line<'static> {
         ]);
     }
 
-    let bar_width = width.saturating_sub(52).clamp(12, 52);
-    let filled = ((window.used_percent / 100.0) * bar_width as f64).round() as usize;
-    Line::from(vec![
-        Span::styled(
-            format!("  │   {:<10}", window.label),
-            Style::default().fg(TERMINAL_MUTED),
-        ),
-        Span::styled("█".repeat(filled), Style::default().fg(color)),
-        Span::styled(
-            pointillist_bar(bar_width - filled),
-            Style::default().fg(TERMINAL_MUTED),
-        ),
+    let bar_width = width.saturating_sub(54).clamp(12, 52);
+    let mut spans = vec![Span::styled(
+        format!("  │   {:<10}", window.label),
+        Style::default()
+            .fg(TERMINAL_WARNING)
+            .add_modifier(Modifier::BOLD),
+    )];
+    spans.extend(bracketed_progress_spans(window.used_percent, bar_width));
+    spans.extend([
         Span::styled(
             format!("  {:>6.1}% used", window.used_percent),
-            Style::default().fg(color),
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
         ),
         Span::styled(
             format!("  {}", format_reset(window.resets_at)),
             Style::default().fg(TERMINAL_MUTED),
         ),
-    ])
+    ]);
+    Line::from(spans)
 }
 
 fn render_focused_body(
@@ -735,12 +733,21 @@ fn account_card_lines(
 
 fn window_section(window: &UsageWindow, width: usize) -> Vec<Line<'static>> {
     let color = usage_color(window.used_percent);
-    let heading = format!("{} {:.1}% used", window.label, window.used_percent);
-    let bar_width = width.clamp(4, 80);
-    let filled = ((window.used_percent / 100.0) * bar_width as f64).round() as usize;
+    let bar_width = width.saturating_sub(20).clamp(4, 80);
+    let mut bar = vec![Span::styled(
+        "usage ",
+        Style::default()
+            .fg(TERMINAL_WARNING)
+            .add_modifier(Modifier::BOLD),
+    )];
+    bar.extend(bracketed_progress_spans(window.used_percent, bar_width));
+    bar.push(Span::styled(
+        format!(" {:>5.1}% used", window.used_percent),
+        Style::default().fg(color).add_modifier(Modifier::BOLD),
+    ));
     let mut lines = vec![
         aligned_line(
-            heading,
+            window.label.clone(),
             format_reset(window.resets_at),
             width,
             Style::default()
@@ -748,13 +755,7 @@ fn window_section(window: &UsageWindow, width: usize) -> Vec<Line<'static>> {
                 .add_modifier(Modifier::BOLD),
             Style::default().fg(TERMINAL_MUTED),
         ),
-        Line::from(vec![
-            Span::styled("█".repeat(filled), Style::default().fg(color)),
-            Span::styled(
-                pointillist_bar(bar_width - filled),
-                Style::default().fg(TERMINAL_MUTED),
-            ),
-        ]),
+        Line::from(bar),
     ];
 
     if window.history.iter().any(|value| *value > 0) {
@@ -914,6 +915,29 @@ fn pointillist_bar(width: usize) -> String {
     bar
 }
 
+fn bracketed_progress_spans(percent: f64, width: usize) -> Vec<Span<'static>> {
+    let filled = ((percent.clamp(0.0, 100.0) / 100.0) * width as f64).round() as usize;
+    vec![
+        Span::styled(
+            "[",
+            Style::default()
+                .fg(TERMINAL_WARNING)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("█".repeat(filled), Style::default().fg(TERMINAL_INFO)),
+        Span::styled(
+            pointillist_bar(width - filled),
+            Style::default().fg(TERMINAL_MUTED),
+        ),
+        Span::styled(
+            "]",
+            Style::default()
+                .fg(TERMINAL_WARNING)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]
+}
+
 fn usage_color(percent: f64) -> Color {
     if percent >= 90.0 {
         TERMINAL_DANGER
@@ -972,5 +996,15 @@ mod tests {
         let bar = pointillist_bar(7);
         assert_eq!(bar.chars().count(), 7);
         assert_eq!(bar, "⠂⠄⠂⠄⠂⠄⠂");
+    }
+
+    #[test]
+    fn bracketed_progress_bar_has_delimiters_and_clamps_fill() {
+        let rendered = bracketed_progress_spans(150.0, 4)
+            .into_iter()
+            .map(|span| span.content)
+            .collect::<String>();
+        assert_eq!(rendered, "[████]");
+        assert_eq!(rendered.chars().count(), 6);
     }
 }
