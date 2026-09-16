@@ -1,10 +1,10 @@
 use std::{collections::BTreeMap, fs, path::Path};
 
 use anyhow::{Context, Result};
-use chrono::{Days, Utc};
+use chrono::{DateTime, Days, Utc};
 use rusqlite::{Connection, params};
 
-use crate::model::DashboardSnapshot;
+use crate::model::{DashboardSnapshot, HealthState, UsageWindow};
 
 pub struct HistoryStore {
     connection: Connection,
@@ -65,11 +65,64 @@ impl HistoryStore {
         transaction.commit()?;
 
         for account in &mut snapshot.accounts {
+            if account.windows.is_empty()
+                && matches!(
+                    account.health.state,
+                    HealthState::Stale | HealthState::RateLimited | HealthState::Error
+                )
+                && let Some((windows, last_success_at)) = self.latest_windows(&account.id)?
+            {
+                account.windows = windows;
+                account.last_success_at = Some(last_success_at);
+                account.health.state = HealthState::Stale;
+            }
             for window in &mut account.windows {
                 window.history = self.daily_peaks(&account.id, &window.key, 7)?;
             }
         }
         Ok(())
+    }
+
+    fn latest_windows(
+        &self,
+        account_id: &str,
+    ) -> Result<Option<(Vec<UsageWindow>, DateTime<Utc>)>> {
+        let observed_at = self.connection.query_row(
+            "SELECT MAX(observed_at) FROM snapshots WHERE account_id = ?1",
+            params![account_id],
+            |row| row.get::<_, Option<i64>>(0),
+        )?;
+        let Some(observed_at) = observed_at else {
+            return Ok(None);
+        };
+        let Some(last_success_at) = DateTime::from_timestamp(observed_at, 0) else {
+            return Ok(None);
+        };
+        let mut statement = self.connection.prepare(
+            "SELECT window_key, used_percent, resets_at
+             FROM snapshots
+             WHERE account_id = ?1 AND observed_at = ?2
+             ORDER BY window_key",
+        )?;
+        let rows = statement.query_map(params![account_id, observed_at], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, f64>(1)?,
+                row.get::<_, Option<i64>>(2)?,
+            ))
+        })?;
+        let mut windows = Vec::new();
+        for row in rows {
+            let (key, used_percent, resets_at) = row?;
+            let label = cached_window_label(&key);
+            windows.push(UsageWindow::new(
+                key,
+                label,
+                used_percent,
+                resets_at.and_then(|timestamp| DateTime::from_timestamp(timestamp, 0)),
+            ));
+        }
+        Ok((!windows.is_empty()).then_some((windows, last_success_at)))
     }
 
     fn daily_peaks(&self, account_id: &str, window_key: &str, days: u64) -> Result<Vec<u64>> {
@@ -113,11 +166,31 @@ impl HistoryStore {
     }
 }
 
+fn cached_window_label(key: &str) -> String {
+    match key {
+        "five_hour" => "5H".to_string(),
+        "weekly" => "WEEKLY".to_string(),
+        "monthly" => "MONTHLY".to_string(),
+        "primary" => "PRIMARY".to_string(),
+        "secondary" => "SECONDARY".to_string(),
+        scoped if scoped.starts_with("weekly_") => {
+            format!(
+                "{} WEEKLY",
+                scoped
+                    .trim_start_matches("weekly_")
+                    .replace('_', " ")
+                    .to_uppercase()
+            )
+        }
+        other => other.replace('_', " ").to_uppercase(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use tempfile::tempdir;
 
-    use crate::model::{AccountSnapshot, DashboardSnapshot, FetchHealth, Provider, UsageWindow};
+    use crate::model::{AccountSnapshot, FetchHealth, Provider, UsageWindow};
 
     use super::*;
 
@@ -145,5 +218,58 @@ mod tests {
 
         assert_eq!(snapshot.accounts[0].windows[0].history.len(), 7);
         assert_eq!(snapshot.accounts[0].windows[0].history[6], 42);
+    }
+
+    #[test]
+    fn restores_latest_windows_as_stale_during_rate_limit() {
+        let directory = tempdir().expect("temporary directory");
+        let mut store = HistoryStore::open(&directory.path().join("history.sqlite3"))
+            .expect("history database");
+        let now = Utc::now();
+        let mut successful = AccountSnapshot::empty(
+            "claude:managed:personal",
+            "personal",
+            Provider::Claude,
+            FetchHealth::ok(),
+        );
+        successful.fetched_at = now;
+        successful.last_success_at = Some(now);
+        successful
+            .windows
+            .push(UsageWindow::new("weekly", "WEEKLY", 42.0, None));
+        store
+            .record_and_hydrate(&mut DashboardSnapshot {
+                generated_at: now,
+                accounts: vec![successful],
+            })
+            .expect("record successful snapshot");
+
+        let mut limited = DashboardSnapshot {
+            generated_at: now + chrono::Duration::minutes(1),
+            accounts: vec![AccountSnapshot::empty(
+                "claude:managed:personal",
+                "personal",
+                Provider::Claude,
+                FetchHealth::failure(
+                    HealthState::RateLimited,
+                    "provider rate limited the usage request",
+                    Some(429),
+                ),
+            )],
+        };
+        store
+            .record_and_hydrate(&mut limited)
+            .expect("restore cached snapshot");
+
+        let account = &limited.accounts[0];
+        assert_eq!(account.health.state, HealthState::Stale);
+        assert_eq!(account.health.status_code, Some(429));
+        assert_eq!(account.windows.len(), 1);
+        assert_eq!(account.windows[0].label, "WEEKLY");
+        assert_eq!(account.windows[0].used_percent, 42.0);
+        assert_eq!(
+            account.last_success_at.map(|time| time.timestamp()),
+            Some(now.timestamp())
+        );
     }
 }
