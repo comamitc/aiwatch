@@ -40,7 +40,7 @@ struct Cli {
     #[arg(long, value_delimiter = ',')]
     provider: Vec<Provider>,
 
-    /// Provider poll interval in seconds. Minimum: 60.
+    /// Provider poll interval in seconds. Minimum: 300.
     #[arg(long)]
     interval: Option<u64>,
 

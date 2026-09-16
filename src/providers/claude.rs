@@ -12,11 +12,12 @@ use crate::{
     model::{AccountSnapshot, DetailMetric, FetchHealth, UsageWindow},
 };
 
-use super::{ProviderError, classify_status, detect_cli_version, parse_rfc3339, read_secret_file};
+use super::{
+    ProviderError, classify_status, detect_cli_version, login_hint, parse_rfc3339, read_secret_file,
+};
 
 const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
 const FALLBACK_VERSION: &str = "2.1.201";
-const LOGIN_HINT: &str = "run `aiwatch account login claude <name>` for a managed account or `claude auth login` for the default account";
 
 #[derive(Deserialize)]
 struct Credentials {
@@ -129,7 +130,7 @@ pub async fn fetch(
         .send()
         .await
         .map_err(|_| ProviderError::Network)?;
-    classify_status(response.status(), LOGIN_HINT)?;
+    classify_status(response.status(), login_hint(account, "claude auth login"))?;
     let body = response.text().await.map_err(|_| ProviderError::Network)?;
     map_usage(account, auth.plan, &body)
 }
@@ -152,7 +153,7 @@ fn read_auth(account: &AccountConfig) -> Result<Auth, ProviderError> {
         .access_token
         .filter(|value| !value.is_empty())
         .map(Zeroizing::new)
-        .ok_or(ProviderError::Authentication(LOGIN_HINT))?;
+        .ok_or_else(|| ProviderError::Authentication(login_hint(account, "claude auth login")))?;
     let plan = oauth
         .rate_limit_tier
         .or(oauth.subscription_type)

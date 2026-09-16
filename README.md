@@ -41,7 +41,7 @@ aiwatch --once                # static terminal snapshot
 aiwatch --json                # one machine-readable snapshot
 aiwatch --provider claude     # one provider
 aiwatch --provider claude,codex
-aiwatch --interval 90         # provider polling interval, minimum 60s
+aiwatch --interval 600        # provider polling interval, minimum 300s
 aiwatch --no-history          # disable local SQLite snapshots
 aiwatch --demo --once         # safe static preview
 ```
@@ -183,7 +183,7 @@ Account profile names appear in terminal and JSON output. Use non-identifying na
 
 The providers officially expose usage through their own applications, but the authenticated HTTP interfaces used by those applications are undocumented. A provider can change its endpoint, headers, authentication, or response schema at any time. `aiwatch` treats malformed responses as provider errors rather than displaying zero usage.
 
-Polling is limited to at least 60 seconds. HTTP `429` responses preserve the last successful data and are shown explicitly.
+Polling is limited to at least five minutes, and requests to multiple accounts on the same provider are staggered. A transient HTTP `429` preserves the last successful data as stale while the next safe poll recovers.
 
 ## Development
 

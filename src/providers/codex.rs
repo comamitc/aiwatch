@@ -11,13 +11,12 @@ use crate::{
 };
 
 use super::{
-    ProviderError, classify_status, credential_file, detect_cli_version, read_secret_file,
-    unix_timestamp,
+    ProviderError, classify_status, credential_file, detect_cli_version, login_hint,
+    read_secret_file, unix_timestamp,
 };
 
 const USAGE_URL: &str = "https://chatgpt.com/backend-api/wham/usage";
 const FALLBACK_VERSION: &str = "0.142.5";
-const LOGIN_HINT: &str = "run `codex login`";
 
 static USER_AGENT: LazyLock<String> = LazyLock::new(|| {
     format!(
@@ -115,7 +114,7 @@ pub async fn fetch(
         .send()
         .await
         .map_err(|_| ProviderError::Network)?;
-    classify_status(response.status(), LOGIN_HINT)?;
+    classify_status(response.status(), login_hint(account, "codex login"))?;
     let body = response.text().await.map_err(|_| ProviderError::Network)?;
     map_usage(account, &body)
 }
@@ -132,7 +131,7 @@ fn read_auth(account: &AccountConfig) -> Result<Auth, ProviderError> {
         .access_token
         .filter(|value| !value.is_empty())
         .map(Zeroizing::new)
-        .ok_or(ProviderError::Authentication(LOGIN_HINT))?;
+        .ok_or_else(|| ProviderError::Authentication(login_hint(account, "codex login")))?;
     let account_id = tokens
         .account_id
         .filter(|value| !value.is_empty())

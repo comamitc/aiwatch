@@ -8,8 +8,8 @@ use serde::Deserialize;
 
 use crate::{accounts, model::Provider};
 
-pub const MIN_POLL_INTERVAL_SECS: u64 = 60;
-pub const DEFAULT_POLL_INTERVAL_SECS: u64 = 60;
+pub const MIN_POLL_INTERVAL_SECS: u64 = 300;
+pub const DEFAULT_POLL_INTERVAL_SECS: u64 = 300;
 
 #[derive(Debug, Clone)]
 pub struct AppConfig {
