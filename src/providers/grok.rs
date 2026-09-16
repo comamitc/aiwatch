@@ -11,13 +11,12 @@ use crate::{
 };
 
 use super::{
-    ProviderError, classify_status, credential_file, detect_cli_version, parse_rfc3339,
+    ProviderError, classify_status, credential_file, detect_cli_version, login_hint, parse_rfc3339,
     read_secret_file,
 };
 
 const BILLING_URL: &str = "https://cli-chat-proxy.grok.com/v1/billing?format=credits";
 const FALLBACK_VERSION: &str = "0.2.112";
-const LOGIN_HINT: &str = "run `grok login`";
 
 static VERSION: LazyLock<String> = LazyLock::new(|| detect_cli_version("grok", FALLBACK_VERSION));
 static USER_AGENT: LazyLock<String> = LazyLock::new(|| {
@@ -115,7 +114,7 @@ pub async fn fetch(
         request = request.header("x-userid", user_id.as_str());
     }
     let response = request.send().await.map_err(|_| ProviderError::Network)?;
-    classify_status(response.status(), LOGIN_HINT)?;
+    classify_status(response.status(), login_hint(account, "grok login"))?;
     let body = response.text().await.map_err(|_| ProviderError::Network)?;
     map_usage(account, &body)
 }
@@ -138,11 +137,15 @@ fn read_auth(account: &AccountConfig) -> Result<Auth, ProviderError> {
 
     let Some((_, entry)) = oauth_entry else {
         if entries.contains_key("xai::api_key") {
-            return Err(ProviderError::Credentials(
-                "Grok API keys do not expose subscription quota; use `grok login`".into(),
-            ));
+            return Err(ProviderError::Credentials(format!(
+                "Grok API keys do not expose subscription quota; {}",
+                login_hint(account, "grok login")
+            )));
         }
-        return Err(ProviderError::Authentication(LOGIN_HINT));
+        return Err(ProviderError::Authentication(login_hint(
+            account,
+            "grok login",
+        )));
     };
 
     let token = entry
@@ -151,7 +154,7 @@ fn read_auth(account: &AccountConfig) -> Result<Auth, ProviderError> {
         .filter(|value| !value.is_empty())
         .cloned()
         .map(Zeroizing::new)
-        .ok_or(ProviderError::Authentication(LOGIN_HINT))?;
+        .ok_or_else(|| ProviderError::Authentication(login_hint(account, "grok login")))?;
     let user_id = entry.user_id.as_ref().cloned().map(Zeroizing::new);
     Ok(Auth { token, user_id })
 }

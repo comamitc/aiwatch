@@ -10,7 +10,7 @@ use thiserror::Error;
 use zeroize::Zeroizing;
 
 use crate::{
-    config::AccountConfig,
+    config::{AccountConfig, CredentialSource},
     model::{AccountSnapshot, HealthState, Provider},
 };
 
@@ -19,7 +19,7 @@ pub enum ProviderError {
     #[error("credentials unavailable: {0}")]
     Credentials(String),
     #[error("authentication required: {0}")]
-    Authentication(&'static str),
+    Authentication(String),
     #[error("provider rate limited the usage request")]
     RateLimited,
     #[error("provider returned HTTP {0}")]
@@ -66,14 +66,27 @@ pub async fn fetch_account(
     }
 }
 
-pub fn classify_status(status: StatusCode, login_hint: &'static str) -> Result<(), ProviderError> {
+pub fn classify_status(
+    status: StatusCode,
+    login_hint: impl Into<String>,
+) -> Result<(), ProviderError> {
     match status {
         StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => {
-            Err(ProviderError::Authentication(login_hint))
+            Err(ProviderError::Authentication(login_hint.into()))
         }
         StatusCode::TOO_MANY_REQUESTS => Err(ProviderError::RateLimited),
         status if status.is_success() => Ok(()),
         status => Err(ProviderError::Http(status.as_u16())),
+    }
+}
+
+pub fn login_hint(account: &AccountConfig, default_command: &str) -> String {
+    match &account.credential_source {
+        CredentialSource::ManagedProfile { .. } => format!(
+            "run `aiwatch account login {} {}`",
+            account.provider, account.name
+        ),
+        CredentialSource::File(_) => format!("run `{default_command}`"),
     }
 }
 
@@ -122,5 +135,28 @@ pub(crate) fn synthetic_account(provider: Provider) -> AccountConfig {
         name: "test".to_string(),
         provider,
         credential_source: crate::config::CredentialSource::File("unused.json".into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn managed_login_hint_names_the_profile() {
+        let account = AccountConfig {
+            id: "grok:managed:personal".to_string(),
+            name: "personal".to_string(),
+            provider: Provider::Grok,
+            credential_source: CredentialSource::ManagedProfile {
+                profile: "profile".into(),
+                credentials: "profile/auth.json".into(),
+            },
+        };
+
+        assert_eq!(
+            login_hint(&account, "grok login"),
+            "run `aiwatch account login grok personal`"
+        );
     }
 }

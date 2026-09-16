@@ -2,7 +2,6 @@ use std::{collections::BTreeMap, path::Path, time::Duration};
 
 use anyhow::{Context, Result};
 use chrono::Utc;
-use futures::future::join_all;
 use reqwest::Client;
 use tokio::sync::{mpsc, watch};
 
@@ -12,6 +11,8 @@ use crate::{
     model::{AccountSnapshot, DashboardSnapshot, FetchHealth, HealthState},
     providers::{ProviderError, fetch_account},
 };
+
+const SAME_PROVIDER_REQUEST_GAP: Duration = Duration::from_secs(2);
 
 pub struct PollCoordinator {
     client: Client,
@@ -37,19 +38,17 @@ impl PollCoordinator {
     }
 
     pub async fn poll_once(&mut self) -> DashboardSnapshot {
-        let requests = self.accounts.iter().cloned().map(|account| {
-            let client = self.client.clone();
-            async move {
-                let result = fetch_account(&client, &account).await;
-                (account, result)
+        let mut previous_provider = None;
+        for account in self.accounts.clone() {
+            if previous_provider == Some(account.provider) {
+                tokio::time::sleep(SAME_PROVIDER_REQUEST_GAP).await;
             }
-        });
-
-        for (account, result) in join_all(requests).await {
+            let result = fetch_account(&self.client, &account).await;
             let snapshot = match result {
                 Ok(snapshot) => snapshot,
                 Err(error) => self.failure_snapshot(&account, error),
             };
+            previous_provider = Some(account.provider);
             self.current.insert(account.id.clone(), snapshot);
         }
 
@@ -121,7 +120,8 @@ impl PollCoordinator {
         );
         if let Some(previous) = self.current.get(&account.id) {
             let mut stale = previous.clone();
-            stale.health = if matches!(health.state, HealthState::Error) {
+            stale.health = if matches!(health.state, HealthState::Error | HealthState::RateLimited)
+            {
                 FetchHealth {
                     state: HealthState::Stale,
                     ..health
@@ -155,5 +155,40 @@ pub fn loading_snapshot(accounts: &[AccountConfig]) -> DashboardSnapshot {
                 )
             })
             .collect(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{config::CredentialSource, model::Provider};
+
+    #[test]
+    fn rate_limit_preserves_previous_data_as_stale() {
+        let account = AccountConfig {
+            id: "claude:managed:personal".to_string(),
+            name: "personal".to_string(),
+            provider: Provider::Claude,
+            credential_source: CredentialSource::File("unused.json".into()),
+        };
+        let mut coordinator = PollCoordinator::new(vec![account.clone()], None).unwrap();
+        coordinator.current.insert(
+            account.id.clone(),
+            AccountSnapshot::empty(
+                account.id.clone(),
+                account.name.clone(),
+                account.provider,
+                FetchHealth::ok(),
+            ),
+        );
+
+        let snapshot = coordinator.failure_snapshot(&account, ProviderError::RateLimited);
+
+        assert_eq!(snapshot.health.state, HealthState::Stale);
+        assert_eq!(snapshot.health.status_code, Some(429));
+        assert_eq!(
+            snapshot.health.message.as_deref(),
+            Some("provider rate limited the usage request")
+        );
     }
 }
