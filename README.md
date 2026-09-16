@@ -183,7 +183,7 @@ Account profile names appear in terminal and JSON output. Use non-identifying na
 
 The providers officially expose usage through their own applications, but the authenticated HTTP interfaces used by those applications are undocumented. A provider can change its endpoint, headers, authentication, or response schema at any time. `aiwatch` treats malformed responses as provider errors rather than displaying zero usage.
 
-Polling is limited to at least five minutes, and requests to multiple accounts on the same provider are staggered. A transient HTTP `429` preserves the last successful data as stale while the next safe poll recovers.
+Polling is limited to at least five minutes, and requests to multiple accounts on the same provider are staggered. A transient HTTP `429` restores the last successful quota data from local history as stale, including after a dashboard restart, while the next safe poll recovers.
 
 ## Development
 
