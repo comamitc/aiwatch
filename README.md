@@ -105,6 +105,8 @@ Isolation uses each CLI's own configuration root:
 
 `CLAUDE_SECURESTORAGE_CONFIG_DIR` is an undocumented Claude Code behavior, not a supported Anthropic API contract, and may change in a future release. Current Claude Code versions derive a distinct macOS Keychain service from its exact value. `aiwatch` supplies the same stable absolute directory to both Claude variables so login, launch, and dashboard lookup address the same slot. `CODEX_HOME`, Codex's file credential mode, and `GROK_HOME` are provider-supported behavior.
 
+On macOS, the first dashboard access to each managed Claude profile may display a Keychain authorization dialog. Choose **Always Allow** to authorize the installed `aiwatch` binary. Choosing **Allow** authorizes only that read; `aiwatch` caches the credential in zeroizing memory for the rest of the process, so successful provider polls do not trigger additional dialogs. Reinstalling or replacing the binary may make macOS request authorization again.
+
 Provider API-key and token environment variables are removed from managed child processes so they cannot silently replace the selected subscription login. `aiwatch` does not infer or print account email addresses.
 
 ## Default credentials

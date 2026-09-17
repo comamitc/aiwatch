@@ -1,7 +1,12 @@
-use std::sync::LazyLock;
+#[cfg(target_os = "macos")]
+use std::{collections::HashMap, path::PathBuf, sync::Mutex};
+use std::{
+    path::Path,
+    sync::{Arc, LazyLock},
+};
 
 use chrono::Utc;
-use reqwest::Client;
+use reqwest::{Client, StatusCode};
 use serde::Deserialize;
 use zeroize::Zeroizing;
 
@@ -18,6 +23,10 @@ use super::{
 
 const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
 const FALLBACK_VERSION: &str = "2.1.201";
+
+#[cfg(target_os = "macos")]
+static MANAGED_AUTH_CACHE: LazyLock<Mutex<HashMap<PathBuf, Arc<Auth>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 #[derive(Deserialize)]
 struct Credentials {
@@ -130,20 +139,74 @@ pub async fn fetch(
         .send()
         .await
         .map_err(|_| ProviderError::Network)?;
+    if matches!(
+        response.status(),
+        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
+    ) {
+        invalidate_managed_auth(account);
+    }
     classify_status(response.status(), login_hint(account, "claude auth login"))?;
     let body = response.text().await.map_err(|_| ProviderError::Network)?;
-    map_usage(account, auth.plan, &body)
+    map_usage(account, auth.plan.as_deref(), &body)
 }
 
-fn read_auth(account: &AccountConfig) -> Result<Auth, ProviderError> {
-    let body = match &account.credential_source {
-        CredentialSource::File(path) => read_secret_file(path)?,
+fn read_auth(account: &AccountConfig) -> Result<Arc<Auth>, ProviderError> {
+    match &account.credential_source {
+        CredentialSource::File(path) => {
+            let body = read_secret_file(path)?;
+            parse_auth(account, body.as_str()).map(Arc::new)
+        }
         CredentialSource::ManagedProfile {
             profile,
             credentials,
-        } => read_managed_credentials(profile, credentials)?,
+        } => {
+            #[cfg(target_os = "macos")]
+            {
+                read_cached_managed_auth(account, profile, credentials)
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                let body = read_managed_credentials(profile, credentials)?;
+                parse_auth(account, body.as_str()).map(Arc::new)
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn read_cached_managed_auth(
+    account: &AccountConfig,
+    profile: &Path,
+    credentials: &Path,
+) -> Result<Arc<Auth>, ProviderError> {
+    let mut cache = MANAGED_AUTH_CACHE.lock().map_err(|_| {
+        ProviderError::Credentials("managed Claude credential cache is unavailable".into())
+    })?;
+    if let Some(auth) = cache.get(profile) {
+        return Ok(Arc::clone(auth));
+    }
+
+    let body = read_managed_credentials(profile, credentials)?;
+    let auth = Arc::new(parse_auth(account, body.as_str())?);
+    cache.insert(profile.to_path_buf(), Arc::clone(&auth));
+    Ok(auth)
+}
+
+#[cfg(target_os = "macos")]
+fn invalidate_managed_auth(account: &AccountConfig) {
+    let CredentialSource::ManagedProfile { profile, .. } = &account.credential_source else {
+        return;
     };
-    let credentials: Credentials = serde_json::from_str(body.as_str()).map_err(|_| {
+    if let Ok(mut cache) = MANAGED_AUTH_CACHE.lock() {
+        cache.remove(profile);
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn invalidate_managed_auth(_account: &AccountConfig) {}
+
+fn parse_auth(account: &AccountConfig, body: &str) -> Result<Auth, ProviderError> {
+    let credentials: Credentials = serde_json::from_str(body).map_err(|_| {
         ProviderError::Credentials("Claude credential store is not valid JSON".into())
     })?;
     let oauth = credentials
@@ -162,8 +225,8 @@ fn read_auth(account: &AccountConfig) -> Result<Auth, ProviderError> {
 }
 
 fn read_managed_credentials(
-    _profile: &std::path::Path,
-    credentials: &std::path::Path,
+    _profile: &Path,
+    credentials: &Path,
 ) -> Result<Zeroizing<String>, ProviderError> {
     #[cfg(target_os = "macos")]
     {
@@ -195,7 +258,7 @@ fn read_managed_credentials(
 
 fn map_usage(
     account: &AccountConfig,
-    plan: Option<String>,
+    plan: Option<&str>,
     body: &str,
 ) -> Result<AccountSnapshot, ProviderError> {
     let raw: UsageResponse = serde_json::from_str(body).map_err(|_| ProviderError::Schema)?;
@@ -250,7 +313,7 @@ fn map_usage(
         id: account.id.clone(),
         name: account.name.clone(),
         provider: account.provider,
-        plan,
+        plan: plan.map(str::to_owned),
         windows,
         details,
         health: FetchHealth::ok(),
@@ -286,13 +349,15 @@ static USER_AGENT: LazyLock<String> = LazyLock::new(|| {
 mod tests {
     use super::*;
     use crate::{model::Provider, providers::synthetic_account};
+    #[cfg(target_os = "macos")]
+    use tempfile::tempdir;
 
     #[test]
     fn maps_windows_scoped_limit_and_money_without_credentials() {
         let account = synthetic_account(Provider::Claude);
         let snapshot = map_usage(
             &account,
-            Some("max 20x".into()),
+            Some("max 20x"),
             include_str!("../../tests/fixtures/claude_usage.json"),
         )
         .expect("Claude fixture should map");
@@ -302,5 +367,38 @@ mod tests {
         assert_eq!(snapshot.windows[0].used_percent, 42.5);
         assert_eq!(snapshot.windows[2].label, "Opus WEEKLY");
         assert_eq!(snapshot.details[0].value, "$12.34");
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn managed_credentials_remain_available_after_first_load() {
+        let temp = tempdir().unwrap();
+        let profile = temp.path().join("personal");
+        std::fs::create_dir(&profile).unwrap();
+        let credentials = profile.join(".credentials.json");
+        std::fs::write(
+            &credentials,
+            r#"{"claudeAiOauth":{"accessToken":"cached-token","subscriptionType":"pro"}}"#,
+        )
+        .unwrap();
+        let account = AccountConfig {
+            id: "claude:managed:personal".into(),
+            name: "personal".into(),
+            provider: Provider::Claude,
+            credential_source: CredentialSource::ManagedProfile {
+                profile,
+                credentials: credentials.clone(),
+            },
+        };
+
+        let first = read_auth(&account).unwrap();
+        std::fs::remove_file(credentials).unwrap();
+        let second = read_auth(&account).unwrap();
+
+        assert_eq!(first.token.as_str(), "cached-token");
+        assert_eq!(second.token.as_str(), "cached-token");
+        assert_eq!(second.plan.as_deref(), Some("pro"));
+        invalidate_managed_auth(&account);
+        assert!(read_auth(&account).is_err());
     }
 }
