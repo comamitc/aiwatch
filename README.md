@@ -121,7 +121,7 @@ A managed profile suppresses automatic discovery of that provider's `default` pr
 
 Grok also respects `GROK_AUTH_PATH` and `GROK_HOME`. On macOS, use a managed Claude account because the default Claude login is normally stored in Keychain rather than `~/.claude/.credentials.json`.
 
-`aiwatch` reads credentials in memory for authenticated quota requests. It never copies tokens into its configuration or history database. It does not refresh OAuth tokens itself. Re-run the matching `aiwatch account login` command when a dashboard profile requires authentication; running the provider through `aiwatch account run` preserves that provider's normal refresh behavior.
+`aiwatch` reads credentials in memory for authenticated quota requests. It never copies tokens into its configuration or history database. Managed Grok profiles refresh expiring or rejected OIDC access tokens through xAI's fixed token endpoint and atomically persist rotated credentials with owner-only permissions. Claude and Codex tokens remain provider-managed; re-run the matching `aiwatch account login` command when those profiles require authentication.
 
 API keys do not expose consumer subscription allowances. The provider CLI must be logged into the subscription account.
 
@@ -173,7 +173,7 @@ The dashboard's nearest-cap value is calculated from the same normalized windows
 - HTTP response bodies are never included in errors.
 - JSON output contains usage data and profile names, never credential paths or tokens.
 - Provider URLs are compiled into the binary. Configuration cannot redirect credentials to another host.
-- OAuth refresh tokens are never used or modified by `aiwatch`.
+- Managed Grok refresh tokens are sent only to the compiled `https://auth.x.ai/oauth2/token` endpoint and are replaced when xAI rotates them.
 - History contains account profile identifiers, percentages, reset timestamps, and observation times only.
 - The project has no analytics or network service other than the three provider quota requests and the official provider login flows it launches.
 
