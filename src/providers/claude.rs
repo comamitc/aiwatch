@@ -1,5 +1,10 @@
 #[cfg(target_os = "macos")]
-use std::{collections::HashMap, path::PathBuf, sync::Mutex};
+use std::{
+    collections::HashMap,
+    path::PathBuf,
+    process::{Command, Stdio},
+    sync::Mutex,
+};
 use std::{
     path::Path,
     sync::{Arc, LazyLock},
@@ -23,6 +28,10 @@ use super::{
 
 const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
 const FALLBACK_VERSION: &str = "2.1.201";
+#[cfg(target_os = "macos")]
+const SECURITY_COMMAND: &str = "/usr/bin/security";
+#[cfg(target_os = "macos")]
+const MAX_CREDENTIAL_BYTES: usize = 1024 * 1024;
 
 #[cfg(target_os = "macos")]
 static MANAGED_AUTH_CACHE: LazyLock<Mutex<HashMap<PathBuf, Arc<Auth>>>> =
@@ -229,24 +238,8 @@ fn read_managed_credentials(
     credentials: &Path,
 ) -> Result<Zeroizing<String>, ProviderError> {
     #[cfg(target_os = "macos")]
-    {
-        let service = claude_keychain_service(_profile);
-        let account = std::env::var("USER").or_else(|_| std::env::var("LOGNAME"));
-        if let Ok(account) = account {
-            if let Ok(bytes) =
-                security_framework::passwords::get_generic_password(&service, &account)
-            {
-                if std::str::from_utf8(&bytes).is_ok() {
-                    let body =
-                        String::from_utf8(bytes).expect("credential bytes were validated as UTF-8");
-                    return Ok(Zeroizing::new(body));
-                }
-                let _bytes = Zeroizing::new(bytes);
-                return Err(ProviderError::Credentials(
-                    "managed Claude credentials are not valid UTF-8".into(),
-                ));
-            }
-        }
+    if let Some(body) = read_macos_keychain(_profile)? {
+        return Ok(body);
     }
 
     read_secret_file(credentials).map_err(|_| {
@@ -254,6 +247,43 @@ fn read_managed_credentials(
             "managed Claude credentials are unavailable; run the account login command".into(),
         )
     })
+}
+
+#[cfg(target_os = "macos")]
+fn read_macos_keychain(profile: &Path) -> Result<Option<Zeroizing<String>>, ProviderError> {
+    let service = claude_keychain_service(profile);
+    let Ok(account) = std::env::var("USER").or_else(|_| std::env::var("LOGNAME")) else {
+        return Ok(None);
+    };
+    let Ok(output) = Command::new(SECURITY_COMMAND)
+        .args([
+            "find-generic-password",
+            "-s",
+            service.as_str(),
+            "-a",
+            account.as_str(),
+            "-w",
+        ])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+    else {
+        return Ok(None);
+    };
+    if !output.status.success() {
+        return Ok(None);
+    }
+    if output.stdout.len() > MAX_CREDENTIAL_BYTES {
+        return Err(ProviderError::Credentials(
+            "managed Claude credential is unexpectedly large".into(),
+        ));
+    }
+    String::from_utf8(output.stdout)
+        .map(Zeroizing::new)
+        .map(Some)
+        .map_err(|_| {
+            ProviderError::Credentials("managed Claude credentials are not valid UTF-8".into())
+        })
 }
 
 fn map_usage(

@@ -105,7 +105,7 @@ Isolation uses each CLI's own configuration root:
 
 `CLAUDE_SECURESTORAGE_CONFIG_DIR` is an undocumented Claude Code behavior, not a supported Anthropic API contract, and may change in a future release. Current Claude Code versions derive a distinct macOS Keychain service from its exact value. `aiwatch` supplies the same stable absolute directory to both Claude variables so login, launch, and dashboard lookup address the same slot. `CODEX_HOME`, Codex's file credential mode, and `GROK_HOME` are provider-supported behavior.
 
-On macOS, the first dashboard access to each managed Claude profile may display a Keychain authorization dialog. Choose **Always Allow** to authorize the installed `aiwatch` binary. Choosing **Allow** authorizes only that read; `aiwatch` caches the credential in zeroizing memory for the rest of the process, so successful provider polls do not trigger additional dialogs. Reinstalling or replacing the binary may make macOS request authorization again.
+On macOS, `aiwatch` reads each managed Claude Keychain item through Apple's stable, signed `/usr/bin/security` helper and caches the parsed credential in zeroizing memory. The replaceable `aiwatch` executable never requests Keychain access directly, so installing a new build does not create per-profile authorization dialogs.
 
 Provider API-key and token environment variables are removed from managed child processes so they cannot silently replace the selected subscription login. `aiwatch` does not infer or print account email addresses.
 
@@ -169,7 +169,7 @@ The dashboard's nearest-cap value is calculated from the same normalized windows
 ## Security model
 
 - Managed profile directories are restricted to the current user on Unix.
-- Claude managed credentials remain in separate macOS Keychain entries when available; other managed credentials remain in owner-protected provider profiles.
+- Claude managed credentials remain in separate macOS Keychain entries and are read through Apple's signed security helper; other managed credentials remain in owner-protected provider profiles.
 - Credential bodies and bearer tokens are wrapped in zeroizing memory.
 - Credential structures do not implement `Debug`.
 - HTTP response bodies are never included in errors.
