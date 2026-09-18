@@ -1,80 +1,14 @@
-use std::fmt::Write;
+use std::time::Duration as PollDuration;
 
-use chrono::{DateTime, Local, Utc};
+use chrono::{DateTime, Utc};
 
-use crate::model::{DashboardSnapshot, HealthState, UsageWindow};
+use crate::{
+    dashboard,
+    model::{DashboardSnapshot, HealthState, UsageWindow},
+};
 
-pub fn render_text(snapshot: &DashboardSnapshot, width: usize) -> String {
-    let mut output = String::new();
-    let _ = writeln!(
-        output,
-        "aiwatch {} accounts · {} providers · {}",
-        snapshot.accounts.len(),
-        snapshot.provider_count(),
-        snapshot
-            .generated_at
-            .with_timezone(&Local)
-            .format("%H:%M:%S")
-    );
-
-    if let Some((account, window)) = snapshot.nearest_limit() {
-        let _ = writeln!(
-            output,
-            "nearest cap: {}/{} · {:.1}% left",
-            account.provider,
-            account.name,
-            window.remaining_percent()
-        );
-    }
-
-    for provider in snapshot.providers() {
-        let _ = writeln!(output, "\n{}", provider.label());
-        for account in snapshot.accounts.iter().filter(|a| a.provider == provider) {
-            let plan = account
-                .plan
-                .as_deref()
-                .map(|plan| format!(" · {plan}"))
-                .unwrap_or_default();
-            let _ = writeln!(
-                output,
-                "  {}{} · {}",
-                account.name,
-                plan,
-                health_text(account.health.state, account.health.status_code)
-            );
-            if account.windows.is_empty() {
-                if let Some(message) = account.health.message.as_deref() {
-                    let _ = writeln!(output, "    {message}");
-                }
-            }
-            for window in &account.windows {
-                let bar_width = width.saturating_sub(46).clamp(10, 40);
-                let _ = writeln!(
-                    output,
-                    "    {:<12} {} {:>6.1}% used  {}",
-                    window.label,
-                    text_bar(window.used_percent, bar_width),
-                    window.used_percent,
-                    format_reset(window.resets_at)
-                );
-            }
-            if !account.details.is_empty() {
-                let details = account
-                    .details
-                    .iter()
-                    .map(|detail| format!("{} {}", detail.label, detail.value))
-                    .collect::<Vec<_>>()
-                    .join(" · ");
-                let _ = writeln!(output, "    {details}");
-            }
-        }
-    }
-    output
-}
-
-pub fn text_bar(used_percent: f64, width: usize) -> String {
-    let filled = ((used_percent.clamp(0.0, 100.0) / 100.0) * width as f64).round() as usize;
-    format!("{}{}", "█".repeat(filled), "░".repeat(width - filled))
+pub fn render_text(snapshot: &DashboardSnapshot, width: usize, poll: PollDuration) -> String {
+    dashboard::render_text(snapshot, width, poll, Utc::now())
 }
 
 pub fn format_reset(reset: Option<DateTime<Utc>>) -> String {
@@ -103,15 +37,7 @@ pub fn format_reset(reset: Option<DateTime<Utc>>) -> String {
 }
 
 pub fn trend(window: &UsageWindow) -> String {
-    const BLOCKS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
-    window
-        .history
-        .iter()
-        .map(|value| {
-            let index = ((*value).min(100) as usize * (BLOCKS.len() - 1)) / 100;
-            BLOCKS[index]
-        })
-        .collect()
+    dashboard::sparkline(&window.history)
 }
 
 pub fn health_text(state: HealthState, status: Option<u16>) -> String {
@@ -128,10 +54,22 @@ pub fn health_text(state: HealthState, status: Option<u16>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::demo;
 
     #[test]
-    fn text_bar_has_stable_width() {
-        assert_eq!(text_bar(50.0, 10).chars().count(), 10);
-        assert_eq!(text_bar(150.0, 10), "██████████");
+    fn text_bar_has_stable_width_and_pace_marker() {
+        assert_eq!(dashboard::usage_bar(50.0, 10, None).chars().count(), 10);
+        assert_eq!(dashboard::usage_bar(150.0, 10, None), "██████████");
+        let with_pace = dashboard::usage_bar(50.0, 10, Some(20.0));
+        assert_eq!(with_pace.chars().count(), 10);
+        assert_eq!(with_pace.chars().nth(2), Some('│'));
+    }
+
+    #[test]
+    fn once_text_renders_compact_dashboard() {
+        let text = render_text(&demo::snapshot(), 160, PollDuration::from_secs(60));
+        assert!(text.contains("ACCOUNT"));
+        assert!(text.contains("pace:"));
+        assert!(text.contains("CLAUDE"));
     }
 }

@@ -1,9 +1,9 @@
 use std::{io, time::Duration};
 
 use anyhow::Result;
-use chrono::{Local, Utc};
+use chrono::{DateTime, Utc};
 use crossterm::{
-    event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers},
+    event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -19,19 +19,25 @@ use ratatui::{
 use tokio::sync::{mpsc, watch};
 
 use crate::{
+    dashboard::{
+        self, ColumnLayout, OverviewModel, PACE_LEGEND, PaceBand, ProfileFilter, ProviderSection,
+        WindowRow,
+    },
     model::{AccountSnapshot, DashboardSnapshot, HealthState, Provider, UsageWindow},
-    output::{format_reset, health_text, trend},
+    output::{format_reset, health_text},
 };
 
-const TERMINAL_BACKGROUND: Color = Color::Reset;
-const TERMINAL_FOREGROUND: Color = Color::Reset;
-const TERMINAL_MUTED: Color = Color::DarkGray;
-const TERMINAL_INFO: Color = Color::LightCyan;
-const TERMINAL_SUCCESS: Color = Color::LightGreen;
-const TERMINAL_WARNING: Color = Color::Yellow;
-const TERMINAL_ACCENT: Color = Color::LightMagenta;
-const TERMINAL_SECONDARY: Color = Color::Magenta;
-const TERMINAL_DANGER: Color = Color::LightRed;
+const BG: Color = Color::Rgb(0x15, 0x15, 0x1e);
+const FG: Color = Color::Rgb(0xc6, 0xc0, 0xd8);
+const SHADE: Color = Color::Rgb(0x1c, 0x1c, 0x28);
+const MUTED: Color = Color::Rgb(0x9c, 0xa3, 0xaf);
+const CLAUDE: Color = Color::Rgb(0xe8, 0xa0, 0x7c);
+const CODEX: Color = Color::Rgb(0x5e, 0xea, 0xd4);
+const GROK: Color = Color::Rgb(0x93, 0xc5, 0xfd);
+const GREEN: Color = Color::Rgb(0x4a, 0xde, 0x80);
+const YELLOW: Color = Color::Rgb(0xea, 0xb3, 0x08);
+const ORANGE: Color = Color::Rgb(0xe0, 0x9a, 0x3e);
+const RED: Color = Color::Rgb(0xf8, 0x71, 0x71);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ViewMode {
@@ -41,6 +47,7 @@ enum ViewMode {
 
 struct AppState {
     provider: Option<Provider>,
+    profile: ProfileFilter,
     weekly_only: bool,
     view: ViewMode,
     selected_account: usize,
@@ -51,6 +58,7 @@ impl AppState {
     fn new() -> Self {
         Self {
             provider: None,
+            profile: ProfileFilter::All,
             weekly_only: false,
             view: ViewMode::Summary,
             selected_account: 0,
@@ -60,6 +68,12 @@ impl AppState {
 
     fn select_provider(&mut self, provider: Option<Provider>) {
         self.provider = provider;
+        self.selected_account = 0;
+        self.scroll = 0;
+    }
+
+    fn cycle_profile(&mut self) {
+        self.profile = self.profile.next();
         self.selected_account = 0;
         self.scroll = 0;
     }
@@ -94,6 +108,13 @@ impl AppState {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum KeyAction {
+    Continue,
+    Quit,
+    Refresh,
+}
+
 struct TerminalGuard;
 
 impl Drop for TerminalGuard {
@@ -123,7 +144,7 @@ pub async fn run(
 
     loop {
         let snapshot = snapshots.borrow().clone();
-        terminal.draw(|frame| render(frame, &snapshot, &state, poll_interval))?;
+        terminal.draw(|frame| render(frame, &snapshot, &state, poll_interval, Utc::now()))?;
 
         tokio::select! {
             _ = tick.tick() => {}
@@ -137,38 +158,10 @@ pub async fn run(
                     if key.kind != KeyEventKind::Press {
                         continue;
                     }
-                    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
-                        break;
-                    }
-                    match key.code {
-                        KeyCode::Char('q') => break,
-                        KeyCode::Char('r') => { let _ = refresh.try_send(()); }
-                        KeyCode::Char('0') => state.select_provider(None),
-                        KeyCode::Char('1') => state.select_provider(Some(Provider::Claude)),
-                        KeyCode::Char('2') => state.select_provider(Some(Provider::Codex)),
-                        KeyCode::Char('3') => state.select_provider(Some(Provider::Grok)),
-                        KeyCode::Char('w') => { state.weekly_only = !state.weekly_only; state.scroll = 0; }
-                        KeyCode::Tab | KeyCode::Char('v') => state.toggle_view(),
-                        KeyCode::Esc => state.show_summary(),
-                        KeyCode::Char('j') if state.view == ViewMode::Focused => {
-                            state.next_account(matching_account_count(&snapshot, state.provider));
-                        }
-                        KeyCode::Char('k') if state.view == ViewMode::Focused => {
-                            state.previous_account(matching_account_count(&snapshot, state.provider));
-                        }
-                        KeyCode::Right if state.view == ViewMode::Focused => {
-                            state.next_account(matching_account_count(&snapshot, state.provider));
-                        }
-                        KeyCode::Left if state.view == ViewMode::Focused => {
-                            state.previous_account(matching_account_count(&snapshot, state.provider));
-                        }
-                        KeyCode::Char('j') | KeyCode::Down | KeyCode::PageDown => {
-                            state.scroll = state.scroll.saturating_add(1);
-                        }
-                        KeyCode::Char('k') | KeyCode::Up | KeyCode::PageUp => {
-                            state.scroll = state.scroll.saturating_sub(1);
-                        }
-                        _ => {}
+                    match handle_key(&mut state, key, &snapshot) {
+                        KeyAction::Quit => break,
+                        KeyAction::Refresh => { let _ = refresh.try_send(()); }
+                        KeyAction::Continue => {}
                     }
                 }
             }
@@ -178,30 +171,85 @@ pub async fn run(
     Ok(())
 }
 
-fn render(frame: &mut Frame<'_>, snapshot: &DashboardSnapshot, state: &AppState, poll: Duration) {
-    let area = frame.area();
-    frame.render_widget(
-        Block::default().style(
-            Style::default()
-                .fg(TERMINAL_FOREGROUND)
-                .bg(TERMINAL_BACKGROUND),
-        ),
-        area,
-    );
-    match state.view {
-        ViewMode::Summary => {
-            let [header, summary, body, footer] = Layout::vertical([
-                Constraint::Length(2),
-                Constraint::Length(3),
-                Constraint::Min(4),
-                Constraint::Length(1),
-            ])
-            .areas(area);
-            render_header(frame, snapshot, poll, header);
-            render_summary(frame, snapshot, summary);
-            render_overview_body(frame, snapshot, state, body);
-            render_footer(frame, state, footer);
+fn handle_key(state: &mut AppState, key: KeyEvent, snapshot: &DashboardSnapshot) -> KeyAction {
+    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+        return KeyAction::Quit;
+    }
+    match key.code {
+        KeyCode::Char('q') => KeyAction::Quit,
+        KeyCode::Char('r') => KeyAction::Refresh,
+        KeyCode::Char('0') => {
+            state.select_provider(None);
+            KeyAction::Continue
         }
+        KeyCode::Char('1') => {
+            state.select_provider(Some(Provider::Claude));
+            KeyAction::Continue
+        }
+        KeyCode::Char('2') => {
+            state.select_provider(Some(Provider::Codex));
+            KeyAction::Continue
+        }
+        KeyCode::Char('3') => {
+            state.select_provider(Some(Provider::Grok));
+            KeyAction::Continue
+        }
+        KeyCode::Char('p') => {
+            state.cycle_profile();
+            KeyAction::Continue
+        }
+        KeyCode::Char('w') => {
+            state.weekly_only = !state.weekly_only;
+            state.scroll = 0;
+            KeyAction::Continue
+        }
+        KeyCode::Tab | KeyCode::Char('v') => {
+            state.toggle_view();
+            KeyAction::Continue
+        }
+        KeyCode::Esc => {
+            state.show_summary();
+            KeyAction::Continue
+        }
+        KeyCode::Char('j') if state.view == ViewMode::Focused => {
+            state.next_account(matching_account_count(snapshot, state));
+            KeyAction::Continue
+        }
+        KeyCode::Char('k') if state.view == ViewMode::Focused => {
+            state.previous_account(matching_account_count(snapshot, state));
+            KeyAction::Continue
+        }
+        KeyCode::Right if state.view == ViewMode::Focused => {
+            state.next_account(matching_account_count(snapshot, state));
+            KeyAction::Continue
+        }
+        KeyCode::Left if state.view == ViewMode::Focused => {
+            state.previous_account(matching_account_count(snapshot, state));
+            KeyAction::Continue
+        }
+        KeyCode::Char('j') | KeyCode::Down | KeyCode::PageDown => {
+            state.scroll = state.scroll.saturating_add(1);
+            KeyAction::Continue
+        }
+        KeyCode::Char('k') | KeyCode::Up | KeyCode::PageUp => {
+            state.scroll = state.scroll.saturating_sub(1);
+            KeyAction::Continue
+        }
+        _ => KeyAction::Continue,
+    }
+}
+
+fn render(
+    frame: &mut Frame<'_>,
+    snapshot: &DashboardSnapshot,
+    state: &AppState,
+    poll: Duration,
+    now: DateTime<Utc>,
+) {
+    let area = frame.area();
+    frame.render_widget(Block::default().style(Style::default().fg(FG).bg(BG)), area);
+    match state.view {
+        ViewMode::Summary => render_overview(frame, snapshot, state, poll, now, area),
         ViewMode::Focused => {
             let [header, body, footer] = Layout::vertical([
                 Constraint::Length(2),
@@ -209,371 +257,270 @@ fn render(frame: &mut Frame<'_>, snapshot: &DashboardSnapshot, state: &AppState,
                 Constraint::Length(1),
             ])
             .areas(area);
-            render_header(frame, snapshot, poll, header);
-            render_focused_body(frame, snapshot, state, body);
+            let model = overview_model(snapshot, state, poll, now, area.width as usize);
+            render_header(frame, &model, header);
+            render_focused_body(frame, snapshot, state, now, body);
             render_footer(frame, state, footer);
         }
     }
 }
 
-fn render_header(frame: &mut Frame<'_>, snapshot: &DashboardSnapshot, poll: Duration, area: Rect) {
-    let title = Line::from(vec![
-        Span::styled(
-            " aiwatch ",
-            Style::default()
-                .fg(TERMINAL_ACCENT)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            env!("CARGO_PKG_VERSION"),
-            Style::default().fg(TERMINAL_SECONDARY),
-        ),
-        Span::styled(
-            format!(
-                "  │  {} accounts · {} providers  │  provider poll {}s",
-                snapshot.accounts.len(),
-                snapshot.provider_count(),
-                poll.as_secs()
-            ),
-            Style::default().fg(TERMINAL_MUTED),
-        ),
-    ]);
-    let clock = Local::now().format("%H:%M:%S").to_string();
-    let [left, right] =
-        Layout::horizontal([Constraint::Min(20), Constraint::Length(12)]).areas(area);
-    frame.render_widget(
-        Paragraph::new(title)
-            .style(Style::default().fg(TERMINAL_MUTED).bg(TERMINAL_BACKGROUND))
-            .block(Block::default().borders(Borders::BOTTOM)),
-        left,
-    );
-    frame.render_widget(
-        Paragraph::new(format!("{clock} ▌ "))
-            .right_aligned()
-            .style(
-                Style::default()
-                    .fg(TERMINAL_SUCCESS)
-                    .bg(TERMINAL_BACKGROUND),
-            )
-            .block(Block::default().borders(Borders::BOTTOM)),
-        right,
-    );
-}
-
-fn render_summary(frame: &mut Frame<'_>, snapshot: &DashboardSnapshot, area: Rect) {
-    let [accounts, providers, nearest, poll] = Layout::horizontal([
-        Constraint::Percentage(20),
-        Constraint::Percentage(20),
-        Constraint::Percentage(35),
-        Constraint::Percentage(25),
-    ])
-    .areas(area);
-
-    summary_box(
-        frame,
-        accounts,
-        "ACCOUNTS",
-        snapshot.accounts.len().to_string(),
-        TERMINAL_SECONDARY,
-    );
-    summary_box(
-        frame,
-        providers,
-        "PROVIDERS",
-        snapshot.provider_count().to_string(),
-        TERMINAL_INFO,
-    );
-
-    let (nearest_value, nearest_color) = snapshot.nearest_limit().map_or_else(
-        || ("waiting for quota data".to_string(), TERMINAL_MUTED),
-        |(account, window)| {
-            (
-                format!(
-                    "{}/{} {} · {:.1}% left",
-                    account.provider,
-                    account.name,
-                    window.label,
-                    window.remaining_percent()
-                ),
-                usage_color(window.used_percent),
-            )
-        },
-    );
-    summary_box(frame, nearest, "NEAREST CAP", nearest_value, nearest_color);
-
-    let ok = snapshot
-        .accounts
-        .iter()
-        .filter(|account| account.health.state == HealthState::Ok)
-        .count();
-    let age = snapshot
-        .accounts
-        .iter()
-        .map(|account| account.fetched_at)
-        .max()
-        .map(|time| {
-            format!(
-                "{} · {ok}/{} ok",
-                age_text(Utc::now() - time),
-                snapshot.accounts.len()
-            )
-        })
-        .unwrap_or_else(|| "not polled".to_string());
-    summary_box(
-        frame,
+fn overview_model<'a>(
+    snapshot: &'a DashboardSnapshot,
+    state: &AppState,
+    poll: Duration,
+    now: DateTime<Utc>,
+    width: usize,
+) -> OverviewModel<'a> {
+    dashboard::build_overview(
+        snapshot,
+        width,
         poll,
-        "LAST POLL",
-        age,
-        if ok == snapshot.accounts.len() {
-            TERMINAL_SUCCESS
-        } else {
-            TERMINAL_WARNING
-        },
-    );
+        state.provider,
+        state.profile,
+        state.weekly_only,
+        now,
+    )
 }
 
-fn summary_box(frame: &mut Frame<'_>, area: Rect, title: &str, value: String, color: Color) {
-    frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            value,
-            Style::default().fg(color).add_modifier(Modifier::BOLD),
-        )))
-        .block(
-            Block::bordered()
-                .border_style(Style::default().fg(TERMINAL_MUTED))
-                .title(Span::styled(
-                    format!(" {title} "),
-                    Style::default().fg(TERMINAL_MUTED),
-                )),
-        )
-        .style(
-            Style::default()
-                .fg(TERMINAL_FOREGROUND)
-                .bg(TERMINAL_BACKGROUND),
-        ),
-        area,
-    );
-}
-
-fn render_overview_body(
+fn render_overview(
     frame: &mut Frame<'_>,
     snapshot: &DashboardSnapshot,
     state: &AppState,
+    poll: Duration,
+    now: DateTime<Utc>,
     area: Rect,
 ) {
-    let width = area.width.saturating_sub(2) as usize;
-    let mut lines = Vec::new();
-    for provider in snapshot
-        .providers()
-        .filter(|provider| state.provider.is_none_or(|filter| filter == *provider))
-    {
-        let accounts = snapshot
-            .accounts
-            .iter()
-            .filter(|account| account.provider == provider)
-            .collect::<Vec<_>>();
-        lines.push(provider_line(provider, &accounts));
-        for account in accounts {
-            lines.extend(account_lines(account, width, state.weekly_only));
-        }
-    }
-    if lines.is_empty() {
-        lines.push(Line::from(Span::styled(
-            "No matching accounts. Configure credentials or clear the provider filter.",
-            Style::default().fg(TERMINAL_WARNING),
-        )));
-    }
-
+    let [header, columns, body, legend, footer] = Layout::vertical([
+        Constraint::Length(2),
+        Constraint::Length(1),
+        Constraint::Min(4),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .areas(area);
+    let model = overview_model(snapshot, state, poll, now, area.width as usize);
+    render_header(frame, &model, header);
+    render_column_headers(frame, model.layout, columns);
+    render_overview_body(frame, &model, state.scroll, body);
     frame.render_widget(
-        Paragraph::new(lines)
-            .style(
-                Style::default()
-                    .fg(TERMINAL_FOREGROUND)
-                    .bg(TERMINAL_BACKGROUND),
-            )
-            .scroll((state.scroll, 0))
-            .block(
-                Block::default()
-                    .borders(Borders::LEFT | Borders::RIGHT)
-                    .border_style(Style::default().fg(TERMINAL_MUTED)),
-            ),
+        Paragraph::new(PACE_LEGEND).style(Style::default().fg(MUTED).bg(BG)),
+        legend,
+    );
+    render_footer(frame, state, footer);
+}
+
+fn render_header(frame: &mut Frame<'_>, model: &OverviewModel<'_>, area: Rect) {
+    let [top, bottom] =
+        Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).areas(area);
+    frame.render_widget(
+        Paragraph::new(model.header_line1.clone()).style(Style::default().fg(FG).bg(BG)),
+        top,
+    );
+    frame.render_widget(
+        Paragraph::new(model.header_line2.clone()).style(Style::default().fg(MUTED).bg(BG)),
+        bottom,
+    );
+}
+
+fn render_column_headers(frame: &mut Frame<'_>, layout: ColumnLayout, area: Rect) {
+    frame.render_widget(
+        Paragraph::new(Line::from(column_header_spans(layout)))
+            .style(Style::default().fg(MUTED).bg(SHADE)),
         area,
     );
 }
 
-fn provider_line(provider: Provider, accounts: &[&AccountSnapshot]) -> Line<'static> {
-    let highest_weekly = accounts
-        .iter()
-        .flat_map(|account| &account.windows)
-        .filter(|window| window.key.contains("weekly") || window.key.contains("monthly"))
-        .map(|window| window.used_percent)
-        .max_by(f64::total_cmp);
-    let nearest = accounts
-        .iter()
-        .flat_map(|account| account.windows.iter().map(move |window| (*account, window)))
-        .max_by(|(_, left), (_, right)| left.used_percent.total_cmp(&right.used_percent));
-    let color = nearest.map_or(TERMINAL_SUCCESS, |(_, window)| {
-        usage_color(window.used_percent)
-    });
-    let mut right = String::new();
-    if let Some(weekly) = highest_weekly {
-        right.push_str(&format!("highest weekly {weekly:.1}%"));
+fn column_header_spans(layout: ColumnLayout) -> Vec<Span<'static>> {
+    let mut spans = vec![
+        cell_span("", layout.accent, MUTED, SHADE),
+        cell_span("ACCOUNT", layout.account, MUTED, SHADE),
+        Span::styled(" ", Style::default().bg(SHADE)),
+        cell_span("WINDOW", layout.window, MUTED, SHADE),
+        Span::styled(" ", Style::default().bg(SHADE)),
+        cell_span("USAGE", layout.usage, MUTED, SHADE),
+        Span::styled(" ", Style::default().bg(SHADE)),
+        cell_span(layout.used_cap_header(), layout.used_cap, MUTED, SHADE),
+        Span::styled(" ", Style::default().bg(SHADE)),
+        cell_span("RESETS", layout.resets, MUTED, SHADE),
+    ];
+    if layout.show_spark {
+        spans.push(Span::styled(" ", Style::default().bg(SHADE)));
+        spans.push(cell_span("7D", layout.spark, MUTED, SHADE));
     }
-    if let Some((account, window)) = nearest {
-        if !right.is_empty() {
-            right.push_str(" · ");
+    spans
+}
+
+fn render_overview_body(frame: &mut Frame<'_>, model: &OverviewModel<'_>, scroll: u16, area: Rect) {
+    let mut lines = Vec::new();
+    if model.sections.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "No matching accounts. Configure credentials or clear the provider filter.",
+            Style::default().fg(YELLOW),
+        )));
+    }
+    for section in &model.sections {
+        lines.push(provider_header_line(
+            section,
+            model.layout,
+            area.width as usize,
+        ));
+        for row in &section.rows {
+            lines.push(window_row_line(row, model.layout, section.provider));
         }
-        right.push_str(&format!(
-            "nearest {}/{} {:.1}% left",
-            account.name,
-            window.label,
-            window.remaining_percent()
+    }
+    frame.render_widget(
+        Paragraph::new(lines)
+            .style(Style::default().fg(FG).bg(BG))
+            .scroll((scroll, 0)),
+        area,
+    );
+}
+
+fn provider_header_line(
+    section: &ProviderSection<'_>,
+    layout: ColumnLayout,
+    width: usize,
+) -> Line<'static> {
+    let accent = provider_accent(section.provider);
+    let left = dashboard::provider_header_text(section);
+    let details = section.details.clone();
+    let mut spans = vec![Span::styled("▎", Style::default().fg(accent).bg(SHADE))];
+    let remaining = width.saturating_sub(layout.accent);
+    if details.is_empty() {
+        spans.push(Span::styled(
+            dashboard::pad_cell(&left, remaining),
+            Style::default()
+                .fg(FG)
+                .bg(SHADE)
+                .add_modifier(Modifier::BOLD),
+        ));
+        return Line::from(spans);
+    }
+    let left_width = left.chars().count();
+    let details_width = details.chars().count();
+    let gap = remaining.saturating_sub(left_width + details_width).max(1);
+    spans.push(Span::styled(
+        left,
+        Style::default()
+            .fg(FG)
+            .bg(SHADE)
+            .add_modifier(Modifier::BOLD),
+    ));
+    spans.push(Span::styled(" ".repeat(gap), Style::default().bg(SHADE)));
+    spans.push(Span::styled(details, Style::default().fg(MUTED).bg(SHADE)));
+    Line::from(spans)
+}
+
+fn window_row_line(row: &WindowRow<'_>, layout: ColumnLayout, provider: Provider) -> Line<'static> {
+    let band = row
+        .used_percent
+        .map(|used| dashboard::pace_band(used, row.pace))
+        .unwrap_or(PaceBand::Gray);
+    let color = band_color(band);
+    let bar = usage_bar_spans(
+        row.used_percent.unwrap_or(0.0),
+        layout.usage,
+        row.pace,
+        color,
+    );
+    let mut spans = vec![
+        Span::styled("▎", Style::default().fg(provider_accent(provider)).bg(BG)),
+        Span::styled(row.account_cell.clone(), Style::default().fg(FG).bg(BG)),
+        Span::raw(" "),
+        Span::styled(row.window_cell.clone(), Style::default().fg(MUTED).bg(BG)),
+        Span::raw(" "),
+    ];
+    spans.extend(bar);
+    spans.extend([
+        Span::raw(" "),
+        Span::styled(row.used_cap_cell.clone(), Style::default().fg(color).bg(BG)),
+        Span::raw(" "),
+        Span::styled(row.resets_cell.clone(), Style::default().fg(MUTED).bg(BG)),
+    ]);
+    if layout.show_spark {
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(
+            row.spark_cell.clone(),
+            Style::default().fg(MUTED).bg(BG),
         ));
     }
-    Line::from(vec![
-        Span::styled("● ", Style::default().fg(color)),
-        Span::styled(
-            format!(
-                "{}  {} account{}",
-                provider.label(),
-                accounts.len(),
-                if accounts.len() == 1 { "" } else { "s" }
-            ),
-            Style::default()
-                .fg(TERMINAL_FOREGROUND)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            if right.is_empty() {
-                String::new()
-            } else {
-                format!("  │  {right}")
-            },
-            Style::default().fg(color),
-        ),
-    ])
+    Line::from(spans)
 }
 
-fn account_lines(account: &AccountSnapshot, width: usize, weekly_only: bool) -> Vec<Line<'static>> {
-    let status_color = health_color(account.health.state);
-    let plan = account
-        .plan
-        .as_deref()
-        .map(|plan| format!("  {plan}"))
-        .unwrap_or_default();
-    let mut lines = vec![Line::from(vec![
-        Span::styled("  ╭─", Style::default().fg(TERMINAL_MUTED)),
-        Span::styled("● ", Style::default().fg(status_color)),
-        Span::styled(
-            account.name.clone(),
-            Style::default()
-                .fg(TERMINAL_FOREGROUND)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(plan, Style::default().fg(TERMINAL_MUTED)),
-        Span::styled(
-            format!(
-                "  ·  {}",
-                health_text(account.health.state, account.health.status_code)
-            ),
-            Style::default().fg(status_color),
-        ),
-    ])];
-
-    let windows = account.windows.iter().filter(|window| {
-        !weekly_only || window.key.contains("weekly") || window.key.contains("monthly")
-    });
-    for window in windows {
-        lines.push(overview_window_line(window, width));
-        if window.history.iter().any(|value| *value > 0) {
-            lines.push(Line::from(vec![
-                Span::raw("  │   7D PEAK   "),
-                Span::styled(trend(window), Style::default().fg(TERMINAL_INFO)),
-                Span::styled("  local daily peaks", Style::default().fg(TERMINAL_MUTED)),
-            ]));
-            lines.push(Line::from(Span::styled(
-                "  │",
-                Style::default().fg(TERMINAL_MUTED),
-            )));
+fn usage_bar_spans(
+    used_percent: f64,
+    width: usize,
+    pace: Option<f64>,
+    fill: Color,
+) -> Vec<Span<'static>> {
+    if width == 0 {
+        return Vec::new();
+    }
+    let filled = ((used_percent.clamp(0.0, 100.0) / 100.0) * width as f64).round() as usize;
+    let marker = dashboard::pace_column(pace, width);
+    let mut spans = Vec::new();
+    let mut index = 0;
+    while index < width {
+        if marker == Some(index) {
+            spans.push(Span::styled(
+                "│",
+                Style::default().fg(FG).bg(BG).add_modifier(Modifier::BOLD),
+            ));
+            index += 1;
+            continue;
+        }
+        let filled_run = index < filled;
+        let start = index;
+        while index < width && marker != Some(index) && (index < filled) == filled_run {
+            index += 1;
+        }
+        let run = index - start;
+        if filled_run {
+            spans.push(Span::styled(
+                "█".repeat(run),
+                Style::default().fg(fill).bg(BG),
+            ));
+        } else {
+            spans.push(Span::styled(
+                "░".repeat(run),
+                Style::default().fg(MUTED).bg(BG),
+            ));
         }
     }
-    if account.windows.is_empty() {
-        lines.push(Line::from(Span::styled(
-            format!(
-                "  │   {}",
-                account
-                    .health
-                    .message
-                    .as_deref()
-                    .unwrap_or("quota unavailable")
-            ),
-            Style::default().fg(status_color),
-        )));
-    }
-    if !account.details.is_empty() {
-        let details = account
-            .details
-            .iter()
-            .map(|detail| format!("{} {}", detail.label, detail.value))
-            .collect::<Vec<_>>()
-            .join(" · ");
-        lines.push(Line::from(Span::styled(
-            format!("  │   {details}"),
-            Style::default().fg(TERMINAL_MUTED),
-        )));
-    }
-    lines.push(Line::from(Span::styled(
-        "  ╰─",
-        Style::default().fg(TERMINAL_MUTED),
-    )));
-    lines.push(Line::from(""));
-    lines
+    spans
 }
 
-fn overview_window_line(window: &UsageWindow, width: usize) -> Line<'static> {
-    let color = usage_color(window.used_percent);
-    if width < 68 {
-        return Line::from(vec![
-            Span::styled(
-                format!("  │   {:<10}", window.label),
-                Style::default().fg(TERMINAL_WARNING),
-            ),
-            Span::styled(
-                format!("{:>6.1}% used", window.used_percent),
-                Style::default().fg(color),
-            ),
-            Span::styled(
-                format!("  {}", format_reset(window.resets_at)),
-                Style::default().fg(TERMINAL_MUTED),
-            ),
-        ]);
-    }
+fn cell_span(text: &str, width: usize, fg: Color, bg: Color) -> Span<'static> {
+    Span::styled(
+        dashboard::pad_cell(text, width),
+        Style::default().fg(fg).bg(bg),
+    )
+}
 
-    let bar_width = width.saturating_sub(54).clamp(12, 52);
-    let mut spans = vec![Span::styled(
-        format!("  │   {:<10}", window.label),
-        Style::default()
-            .fg(TERMINAL_WARNING)
-            .add_modifier(Modifier::BOLD),
-    )];
-    spans.extend(bracketed_progress_spans(window.used_percent, bar_width));
-    spans.extend([
-        Span::styled(
-            format!("  {:>6.1}% used", window.used_percent),
-            Style::default().fg(color).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            format!("  {}", format_reset(window.resets_at)),
-            Style::default().fg(TERMINAL_MUTED),
-        ),
-    ]);
-    Line::from(spans)
+fn provider_accent(provider: Provider) -> Color {
+    match provider {
+        Provider::Claude => CLAUDE,
+        Provider::Codex => CODEX,
+        Provider::Grok => GROK,
+    }
+}
+
+fn band_color(band: PaceBand) -> Color {
+    match band {
+        PaceBand::Green => GREEN,
+        PaceBand::Yellow => YELLOW,
+        PaceBand::Orange => ORANGE,
+        PaceBand::Red => RED,
+        PaceBand::Gray => MUTED,
+    }
 }
 
 fn render_focused_body(
     frame: &mut Frame<'_>,
     snapshot: &DashboardSnapshot,
     state: &AppState,
+    now: DateTime<Utc>,
     area: Rect,
 ) {
     let Some((index, count, account)) = selected_account(snapshot, state) else {
@@ -581,55 +528,34 @@ fn render_focused_body(
             Paragraph::new(
                 "No matching accounts. Configure credentials or clear the provider filter.",
             )
-            .style(
-                Style::default()
-                    .fg(TERMINAL_WARNING)
-                    .bg(TERMINAL_BACKGROUND),
-            )
-            .block(
-                Block::bordered()
-                    .border_style(Style::default().fg(TERMINAL_MUTED))
-                    .title(" ACCOUNT "),
-            ),
+            .style(Style::default().fg(YELLOW).bg(BG)),
             area,
         );
         return;
     };
 
-    let content_width = area.width.saturating_sub(6) as usize;
-    let lines = account_card_lines(account, index, count, content_width, state.weekly_only);
+    let content_width = area.width.saturating_sub(4) as usize;
+    let lines = account_card_lines(account, index, count, content_width, state.weekly_only, now);
     let title = Line::from(vec![
         Span::styled(
             format!(" {} ", account.provider.label()),
             Style::default()
-                .fg(usage_color(
-                    account
-                        .windows
-                        .iter()
-                        .map(|window| window.used_percent)
-                        .max_by(f64::total_cmp)
-                        .unwrap_or_default(),
-                ))
+                .fg(provider_accent(account.provider))
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
             format!("/ {} ", account.name),
-            Style::default()
-                .fg(TERMINAL_FOREGROUND)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(FG).add_modifier(Modifier::BOLD),
         ),
     ]);
     frame.render_widget(
         Paragraph::new(lines)
-            .style(
-                Style::default()
-                    .fg(TERMINAL_FOREGROUND)
-                    .bg(TERMINAL_BACKGROUND),
-            )
+            .style(Style::default().fg(FG).bg(BG))
             .scroll((state.scroll, 0))
             .block(
-                Block::bordered()
-                    .border_style(Style::default().fg(TERMINAL_MUTED))
+                Block::default()
+                    .borders(Borders::TOP)
+                    .border_style(Style::default().fg(MUTED))
                     .title(title)
                     .padding(ratatui::widgets::Padding::horizontal(2)),
             ),
@@ -637,33 +563,23 @@ fn render_focused_body(
     );
 }
 
-fn matching_account_count(snapshot: &DashboardSnapshot, provider: Option<Provider>) -> usize {
-    snapshot
-        .accounts
-        .iter()
-        .filter(|account| provider.is_none_or(|filter| account.provider == filter))
-        .count()
+fn matching_account_count(snapshot: &DashboardSnapshot, state: &AppState) -> usize {
+    dashboard::visible_accounts(snapshot, state.provider, state.profile).len()
 }
 
 fn selected_account<'a>(
     snapshot: &'a DashboardSnapshot,
     state: &AppState,
 ) -> Option<(usize, usize, &'a AccountSnapshot)> {
-    let count = matching_account_count(snapshot, state.provider);
-    if count == 0 {
+    let accounts = dashboard::visible_accounts(snapshot, state.provider, state.profile);
+    if accounts.is_empty() {
         return None;
     }
-    let index = state.selected_account.min(count - 1);
-    snapshot
-        .accounts
-        .iter()
-        .filter(|account| {
-            state
-                .provider
-                .is_none_or(|filter| account.provider == filter)
-        })
-        .nth(index)
-        .map(|account| (index, count, account))
+    let index = state.selected_account.min(accounts.len() - 1);
+    accounts
+        .get(index)
+        .copied()
+        .map(|account| (index, accounts.len(), account))
 }
 
 fn account_card_lines(
@@ -672,11 +588,12 @@ fn account_card_lines(
     count: usize,
     width: usize,
     weekly_only: bool,
+    now: DateTime<Utc>,
 ) -> Vec<Line<'static>> {
     let status_color = health_color(account.health.state);
     let meta = format!(
         "Updated {} · {}",
-        age_text(Utc::now() - account.fetched_at),
+        dashboard::age_text(now - account.fetched_at),
         health_text(account.health.state, account.health.status_code)
     );
     let position = account.plan.as_deref().map_or_else(
@@ -689,20 +606,20 @@ fn account_card_lines(
             position,
             width,
             Style::default().fg(status_color),
-            Style::default()
-                .fg(TERMINAL_FOREGROUND)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(FG).add_modifier(Modifier::BOLD),
         ),
         divider_line(width),
         Line::from(""),
     ];
 
     let mut rendered_window = false;
-    for window in account.windows.iter().filter(|window| {
-        !weekly_only || window.key.contains("weekly") || window.key.contains("monthly")
-    }) {
+    for window in account
+        .windows
+        .iter()
+        .filter(|window| dashboard::window_is_weekly_view(window, weekly_only))
+    {
         rendered_window = true;
-        lines.extend(window_section(window, width));
+        lines.extend(window_section(window, width, now));
         lines.push(Line::from(""));
     }
     if !rendered_window {
@@ -721,9 +638,7 @@ fn account_card_lines(
         lines.push(divider_line(width));
         lines.push(Line::from(Span::styled(
             "DETAILS",
-            Style::default()
-                .fg(TERMINAL_ACCENT)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(MUTED).add_modifier(Modifier::BOLD),
         )));
         lines.push(Line::from(""));
         lines.extend(detail_grid_lines(account, width));
@@ -731,16 +646,15 @@ fn account_card_lines(
     lines
 }
 
-fn window_section(window: &UsageWindow, width: usize) -> Vec<Line<'static>> {
-    let color = usage_color(window.used_percent);
+fn window_section(window: &UsageWindow, width: usize, now: DateTime<Utc>) -> Vec<Line<'static>> {
+    let pace = window.pace_used_percent(now);
+    let color = band_color(dashboard::pace_band(window.used_percent, pace));
     let bar_width = width.saturating_sub(20).clamp(4, 80);
     let mut bar = vec![Span::styled(
         "usage ",
-        Style::default()
-            .fg(TERMINAL_WARNING)
-            .add_modifier(Modifier::BOLD),
+        Style::default().fg(MUTED).add_modifier(Modifier::BOLD),
     )];
-    bar.extend(bracketed_progress_spans(window.used_percent, bar_width));
+    bar.extend(usage_bar_spans(window.used_percent, bar_width, pace, color));
     bar.push(Span::styled(
         format!(" {:>5.1}% used", window.used_percent),
         Style::default().fg(color).add_modifier(Modifier::BOLD),
@@ -750,10 +664,8 @@ fn window_section(window: &UsageWindow, width: usize) -> Vec<Line<'static>> {
             window.label.clone(),
             format_reset(window.resets_at),
             width,
-            Style::default()
-                .fg(TERMINAL_FOREGROUND)
-                .add_modifier(Modifier::BOLD),
-            Style::default().fg(TERMINAL_MUTED),
+            Style::default().fg(FG).add_modifier(Modifier::BOLD),
+            Style::default().fg(MUTED),
         ),
         Line::from(bar),
     ];
@@ -764,10 +676,8 @@ fn window_section(window: &UsageWindow, width: usize) -> Vec<Line<'static>> {
             "7D PEAKS".to_string(),
             format!("peak {peak}%"),
             width,
-            Style::default()
-                .fg(TERMINAL_INFO)
-                .add_modifier(Modifier::BOLD),
-            Style::default().fg(TERMINAL_MUTED),
+            Style::default().fg(MUTED).add_modifier(Modifier::BOLD),
+            Style::default().fg(MUTED),
         ));
         lines.extend(history_chart_lines(&window.history, width));
     }
@@ -798,21 +708,18 @@ fn history_chart_lines(history: &[u64], width: usize) -> Vec<Line<'static>> {
                 chart.push(' ');
             }
         }
-        lines.push(Line::from(Span::styled(
-            chart,
-            Style::default().fg(TERMINAL_INFO),
-        )));
+        lines.push(Line::from(Span::styled(chart, Style::default().fg(MUTED))));
     }
     lines.push(Line::from(Span::styled(
         "─".repeat(chart_width),
-        Style::default().fg(TERMINAL_MUTED),
+        Style::default().fg(MUTED),
     )));
     lines.push(aligned_line(
         "oldest".to_string(),
         "today".to_string(),
         chart_width,
-        Style::default().fg(TERMINAL_MUTED),
-        Style::default().fg(TERMINAL_MUTED),
+        Style::default().fg(MUTED),
+        Style::default().fg(MUTED),
     ));
     lines
 }
@@ -826,16 +733,14 @@ fn detail_grid_lines(account: &AccountSnapshot, width: usize) -> Vec<Line<'stati
             &row[0].label,
             right_label,
             column_width,
-            Style::default().fg(TERMINAL_MUTED),
+            Style::default().fg(MUTED),
         ));
         let right_value = row.get(1).map_or("", |detail| detail.value.as_str());
         lines.push(two_column_line(
             &row[0].value,
             right_value,
             column_width,
-            Style::default()
-                .fg(TERMINAL_FOREGROUND)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(FG).add_modifier(Modifier::BOLD),
         ));
         lines.push(Line::from(""));
     }
@@ -869,19 +774,14 @@ fn aligned_line(
 }
 
 fn divider_line(width: usize) -> Line<'static> {
-    Line::from(Span::styled(
-        "─".repeat(width),
-        Style::default().fg(TERMINAL_MUTED),
-    ))
+    Line::from(Span::styled("─".repeat(width), Style::default().fg(MUTED)))
 }
 
 fn health_color(state: HealthState) -> Color {
     match state {
-        HealthState::Ok => TERMINAL_SUCCESS,
-        HealthState::Stale => TERMINAL_WARNING,
-        HealthState::AuthenticationRequired | HealthState::RateLimited | HealthState::Error => {
-            TERMINAL_DANGER
-        }
+        HealthState::Ok => GREEN,
+        HealthState::Stale => YELLOW,
+        HealthState::AuthenticationRequired | HealthState::RateLimited | HealthState::Error => RED,
     }
 }
 
@@ -894,75 +794,58 @@ fn render_footer(frame: &mut Frame<'_>, state: &AppState, area: Rect) {
     };
     let controls = match state.view {
         ViewMode::Summary => {
-            " q quit  r refresh  j/k or ↑/↓ scroll  tab focused  0-3 provider  w weekly "
+            " q quit  r refresh  j/k or ↑/↓ scroll  tab focused  0-3 provider  w weekly  p profile "
         }
         ViewMode::Focused => {
-            " q quit  r refresh  j/k or ←/→ account  ↑/↓ scroll  tab summary  0-3 provider  w weekly "
+            " q quit  r refresh  j/k or ←/→ account  ↑/↓ scroll  tab summary  0-3 provider  w weekly  p profile "
         }
     };
     frame.render_widget(
-        Paragraph::new(format!("{controls} │  {filter} · {weekly}"))
-            .style(Style::default().fg(TERMINAL_MUTED).bg(TERMINAL_BACKGROUND)),
+        Paragraph::new(format!(
+            "{controls} │  {filter} · {} · {weekly}",
+            state.profile.label()
+        ))
+        .style(Style::default().fg(MUTED).bg(BG)),
         area,
     );
-}
-
-fn pointillist_bar(width: usize) -> String {
-    let mut bar = "⠂⠄".repeat(width / 2);
-    if width % 2 == 1 {
-        bar.push('⠂');
-    }
-    bar
-}
-
-fn bracketed_progress_spans(percent: f64, width: usize) -> Vec<Span<'static>> {
-    let filled = ((percent.clamp(0.0, 100.0) / 100.0) * width as f64).round() as usize;
-    vec![
-        Span::styled(
-            "[",
-            Style::default()
-                .fg(TERMINAL_WARNING)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("█".repeat(filled), Style::default().fg(TERMINAL_INFO)),
-        Span::styled(
-            pointillist_bar(width - filled),
-            Style::default().fg(TERMINAL_MUTED),
-        ),
-        Span::styled(
-            "]",
-            Style::default()
-                .fg(TERMINAL_WARNING)
-                .add_modifier(Modifier::BOLD),
-        ),
-    ]
-}
-
-fn usage_color(percent: f64) -> Color {
-    if percent >= 90.0 {
-        TERMINAL_DANGER
-    } else if percent >= 70.0 {
-        TERMINAL_WARNING
-    } else {
-        TERMINAL_SUCCESS
-    }
-}
-
-fn age_text(age: chrono::Duration) -> String {
-    if age.num_seconds() < 2 {
-        "now".to_string()
-    } else if age.num_minutes() < 1 {
-        format!("{}s ago", age.num_seconds())
-    } else if age.num_hours() < 1 {
-        format!("{}m ago", age.num_minutes())
-    } else {
-        format!("{}h ago", age.num_hours())
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        demo,
+        model::{FetchHealth, UsageWindow},
+    };
+    use chrono::Duration as ChronoDuration;
+    use ratatui::{Terminal, backend::TestBackend, buffer::Buffer};
+
+    fn press(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn buffer_line(buffer: &Buffer, y: u16) -> String {
+        (0..buffer.area.width)
+            .map(|x| buffer[(x, y)].symbol().to_string())
+            .collect()
+    }
+
+    fn buffer_text(buffer: &Buffer) -> String {
+        (0..buffer.area.height)
+            .map(|y| buffer_line(buffer, y))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn draw_overview(width: u16, height: u16, state: &AppState) -> Buffer {
+        let snapshot = demo::snapshot();
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| render(frame, &snapshot, state, Duration::from_secs(60), Utc::now()))
+            .expect("draw");
+        terminal.backend().buffer().clone()
+    }
 
     #[test]
     fn account_navigation_wraps_and_resets_scroll() {
@@ -992,19 +875,193 @@ mod tests {
     }
 
     #[test]
-    fn pointillist_bar_preserves_cell_width() {
-        let bar = pointillist_bar(7);
-        assert_eq!(bar.chars().count(), 7);
-        assert_eq!(bar, "⠂⠄⠂⠄⠂⠄⠂");
+    fn existing_keys_keep_working_and_z_is_ignored() {
+        let snapshot = demo::snapshot();
+        let mut state = AppState::new();
+        assert_eq!(
+            handle_key(&mut state, press(KeyCode::Char('q')), &snapshot),
+            KeyAction::Quit
+        );
+        assert_eq!(
+            handle_key(&mut state, press(KeyCode::Char('r')), &snapshot),
+            KeyAction::Refresh
+        );
+        handle_key(&mut state, press(KeyCode::Char('1')), &snapshot);
+        assert_eq!(state.provider, Some(Provider::Claude));
+        handle_key(&mut state, press(KeyCode::Char('2')), &snapshot);
+        assert_eq!(state.provider, Some(Provider::Codex));
+        handle_key(&mut state, press(KeyCode::Char('3')), &snapshot);
+        assert_eq!(state.provider, Some(Provider::Grok));
+        handle_key(&mut state, press(KeyCode::Char('0')), &snapshot);
+        assert_eq!(state.provider, None);
+        handle_key(&mut state, press(KeyCode::Char('w')), &snapshot);
+        assert!(state.weekly_only);
+        handle_key(&mut state, press(KeyCode::Tab), &snapshot);
+        assert_eq!(state.view, ViewMode::Focused);
+        handle_key(&mut state, press(KeyCode::Char('v')), &snapshot);
+        assert_eq!(state.view, ViewMode::Summary);
+        handle_key(&mut state, press(KeyCode::Char('j')), &snapshot);
+        assert_eq!(state.scroll, 1);
+        handle_key(&mut state, press(KeyCode::Char('k')), &snapshot);
+        assert_eq!(state.scroll, 0);
+        handle_key(&mut state, press(KeyCode::Down), &snapshot);
+        handle_key(&mut state, press(KeyCode::Up), &snapshot);
+        handle_key(&mut state, press(KeyCode::Char('z')), &snapshot);
+        assert_eq!(state.view, ViewMode::Summary);
+        assert_eq!(state.profile, ProfileFilter::All);
     }
 
     #[test]
-    fn bracketed_progress_bar_has_delimiters_and_clamps_fill() {
-        let rendered = bracketed_progress_spans(150.0, 4)
-            .into_iter()
-            .map(|span| span.content)
-            .collect::<String>();
-        assert_eq!(rendered, "[████]");
-        assert_eq!(rendered.chars().count(), 6);
+    fn profile_key_cycles_all_personal_work_and_keeps_unclassifiable_on_all() {
+        let mut snapshot = demo::snapshot();
+        snapshot.accounts.push(AccountSnapshot::empty(
+            "claude:other",
+            "other",
+            Provider::Claude,
+            FetchHealth::ok(),
+        ));
+        let mut state = AppState::new();
+        assert_eq!(
+            dashboard::visible_accounts(&snapshot, None, ProfileFilter::All)
+                .iter()
+                .filter(|account| account.name == "other")
+                .count(),
+            1
+        );
+        handle_key(&mut state, press(KeyCode::Char('p')), &snapshot);
+        assert_eq!(state.profile, ProfileFilter::Personal);
+        assert!(
+            dashboard::visible_accounts(&snapshot, None, state.profile)
+                .iter()
+                .all(|account| dashboard::name_has_token(&account.name, "personal"))
+        );
+        handle_key(&mut state, press(KeyCode::Char('p')), &snapshot);
+        assert_eq!(state.profile, ProfileFilter::Work);
+        handle_key(&mut state, press(KeyCode::Char('p')), &snapshot);
+        assert_eq!(state.profile, ProfileFilter::All);
+        assert!(
+            dashboard::visible_accounts(&snapshot, None, ProfileFilter::All)
+                .iter()
+                .any(|account| account.name == "other")
+        );
+    }
+
+    #[test]
+    fn overview_160x30_is_compact_table_with_theme_and_legend() {
+        let buffer = draw_overview(160, 30, &AppState::new());
+        let text = buffer_text(&buffer);
+        let line0 = buffer_line(&buffer, 0);
+        let line1 = buffer_line(&buffer, 1);
+        let columns = buffer_line(&buffer, 2);
+        assert!(line0.contains("aiwatch"));
+        assert!(line0.contains(env!("CARGO_PKG_VERSION")));
+        assert!(line0.contains("profile all"));
+        assert!(line1.contains("poll 60s"));
+        assert!(line1.contains("nearest cap"));
+        assert!(line1.contains("freshness"));
+        assert!(line1.contains("health"));
+        assert!(columns.contains("ACCOUNT"));
+        assert!(columns.contains("WINDOW"));
+        assert!(columns.contains("USAGE"));
+        assert!(columns.contains("% USED / CAP"));
+        assert!(columns.contains("RESETS"));
+        assert!(columns.contains("7D"));
+        assert!(text.contains("CLAUDE"));
+        assert!(text.contains("CODEX"));
+        assert!(text.contains("GROK"));
+        assert!(text.contains("pace:"));
+        assert!(text.contains("on-pace marker"));
+        assert!(!text.contains("7D PEAK"));
+        assert!(!text.contains("local daily peaks"));
+        assert!(!text.contains("NEAREST CAP"));
+        let footer = buffer_line(&buffer, 29);
+        assert!(footer.contains("p profile"));
+        assert!(!footer.contains("z "));
+        assert!(!footer.contains("zoom"));
+        assert_eq!(buffer[(0, 0)].bg, BG);
+        assert_eq!(buffer[(8, 0)].fg, FG);
+        let claude_y = (0..buffer.area.height)
+            .find(|y| buffer_line(&buffer, *y).contains("CLAUDE"))
+            .expect("claude section");
+        assert_eq!(buffer[(0, claude_y)].fg, CLAUDE);
+        assert_eq!(buffer[(0, claude_y)].bg, SHADE);
+    }
+
+    #[test]
+    fn overview_narrow_width_drops_spark_then_cap() {
+        let mid = buffer_text(&draw_overview(140, 24, &AppState::new()));
+        let mid_header = mid.lines().nth(2).expect("columns");
+        assert!(mid_header.contains("ACCOUNT"));
+        assert!(mid_header.contains("WINDOW"));
+        assert!(mid_header.contains("% USED / CAP"));
+        assert!(mid_header.contains("RESETS"));
+        assert!(!mid_header.contains("7D"));
+
+        let narrow = buffer_text(&draw_overview(110, 24, &AppState::new()));
+        let narrow_header = narrow.lines().nth(2).expect("columns");
+        assert!(narrow_header.contains("% USED"));
+        assert!(!narrow_header.contains("CAP"));
+        assert!(!narrow_header.contains("7D"));
+        assert!(narrow_header.contains("RESETS"));
+    }
+
+    #[test]
+    fn orange_band_uses_distinct_rgb_and_marker_is_present() {
+        let now = Utc::now();
+        let mut snapshot = DashboardSnapshot {
+            generated_at: now,
+            accounts: Vec::new(),
+        };
+        let mut account =
+            AccountSnapshot::empty("claude:work", "work", Provider::Claude, FetchHealth::ok());
+        let remaining = ChronoDuration::hours(2) + ChronoDuration::minutes(30);
+        account.windows.push(UsageWindow::new(
+            "five_hour",
+            "5H",
+            65.0,
+            Some(now + remaining),
+        ));
+        snapshot.accounts.push(account);
+        let backend = TestBackend::new(160, 16);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| {
+                render(
+                    frame,
+                    &snapshot,
+                    &AppState::new(),
+                    Duration::from_secs(300),
+                    now,
+                )
+            })
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+        let text = buffer_text(buffer);
+        assert!(text.contains('│'));
+        let mut saw_orange = false;
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                if buffer[(x, y)].fg == ORANGE {
+                    saw_orange = true;
+                }
+                assert_ne!(buffer[(x, y)].fg, YELLOW);
+            }
+        }
+        assert!(saw_orange);
+        let window = &snapshot.accounts[0].windows[0];
+        assert_eq!(
+            dashboard::pace_band(window.used_percent, window.pace_used_percent(now)),
+            PaceBand::Orange
+        );
+    }
+
+    #[test]
+    fn footer_and_header_show_profile_filter() {
+        let mut state = AppState::new();
+        state.profile = ProfileFilter::Work;
+        let buffer = draw_overview(160, 30, &state);
+        assert!(buffer_line(&buffer, 0).contains("profile work"));
+        assert!(buffer_line(&buffer, 29).contains("work"));
+        assert!(!buffer_text(&buffer).contains("zoom"));
     }
 }

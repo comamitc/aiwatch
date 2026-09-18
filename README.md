@@ -8,7 +8,7 @@ Early public release. The quota endpoints used by the official clients are not p
 
 ## Features
 
-- All-account summary dashboard with an optional focused account view
+- Compact all-account provider dashboard with an optional focused account view
 - Claude five-hour, weekly, and model-scoped weekly windows
 - Codex primary five-hour and secondary weekly windows
 - Grok weekly or monthly included allowance and product breakdown
@@ -59,6 +59,7 @@ Interactive keys:
 | Left/right arrows | Select the next/previous account in focused view |
 | Up/down arrows or Page Up/Page Down | Scroll the current view |
 | `w` | Toggle weekly-only view |
+| `p` | Cycle the profile filter: all, then personal, then work |
 
 ## Multiple accounts
 
@@ -164,7 +165,7 @@ Managed profiles are included in addition to explicitly configured accounts. The
 - Token or message denominators are not shown unless a provider reports them authoritatively.
 - Percentages from differently sized accounts are never averaged into a misleading combined quota.
 
-The dashboard's nearest-cap value is calculated from the same normalized windows used to render account bars.
+The dashboard's nearest-cap value is the soonest future reset among currently visible windows. Usage bars and percentages are colored from each window's own remaining-time pace.
 
 ## Security model
 

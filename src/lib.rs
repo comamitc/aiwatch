@@ -1,5 +1,6 @@
 pub mod accounts;
 pub mod config;
+pub mod dashboard;
 pub mod demo;
 pub mod history;
 pub mod model;
