@@ -922,7 +922,6 @@ mod tests {
         snapshot
     }
 
-
     #[test]
     fn account_navigation_wraps_and_resets_scroll() {
         let mut state = AppState::new();
@@ -1223,7 +1222,10 @@ mod tests {
         let claude_rows = ((claude + 1)..codex)
             .filter(|&index| lines[index].contains("5H") || lines[index].contains("WEEKLY"))
             .collect::<Vec<_>>();
-        assert_eq!(claude_rows, [claude + 2, claude + 4, claude + 7, claude + 9]);
+        assert_eq!(
+            claude_rows,
+            [claude + 2, claude + 4, claude + 7, claude + 9]
+        );
         assert!(is_accent_gap(&lines[claude_rows[0] + 1]));
         assert!(is_accent_gap(&lines[claude_rows[1] + 1]));
         assert!(is_accent_gap(&lines[claude_rows[1] + 2]));
@@ -1244,5 +1246,4 @@ mod tests {
         assert!(scrolled_text.contains("GROK") || scrolled_text.contains("CODEX"));
         assert!(!scrolled_text.contains("CLAUDE") || scrolled_text.contains("CODEX"));
     }
-
 }
