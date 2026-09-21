@@ -359,13 +359,25 @@ fn render_overview_body(frame: &mut Frame<'_>, model: &OverviewModel<'_>, scroll
             Style::default().fg(YELLOW),
         )));
     }
-    for section in &model.sections {
+    for (section_index, section) in model.sections.iter().enumerate() {
+        if section_index > 0 {
+            lines.push(Line::from(""));
+            lines.push(Line::from(""));
+        }
         lines.push(provider_header_line(
             section,
             model.layout,
             area.width as usize,
         ));
-        for row in &section.rows {
+        for (row_index, row) in section.rows.iter().enumerate() {
+            let blanks = if row_index > 0 && row.first_for_account {
+                2
+            } else {
+                1
+            };
+            for _ in 0..blanks {
+                lines.push(provider_accent_blank(section.provider));
+            }
             lines.push(window_row_line(row, model.layout, section.provider));
         }
     }
@@ -375,6 +387,13 @@ fn render_overview_body(frame: &mut Frame<'_>, model: &OverviewModel<'_>, scroll
             .scroll((scroll, 0)),
         area,
     );
+}
+
+fn provider_accent_blank(provider: Provider) -> Line<'static> {
+    Line::from(Span::styled(
+        "▎",
+        Style::default().fg(provider_accent(provider)).bg(BG),
+    ))
 }
 
 fn provider_header_line(
@@ -463,9 +482,13 @@ fn usage_bar_spans(
     let mut index = 0;
     while index < width {
         if marker == Some(index) {
+            let marker_bg = if index < filled { fill } else { MUTED };
             spans.push(Span::styled(
                 "│",
-                Style::default().fg(FG).bg(BG).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(FG)
+                    .bg(marker_bg)
+                    .add_modifier(Modifier::BOLD),
             ));
             index += 1;
             continue;
@@ -847,6 +870,59 @@ mod tests {
         terminal.backend().buffer().clone()
     }
 
+    fn draw_snapshot(
+        snapshot: &DashboardSnapshot,
+        state: &AppState,
+        width: u16,
+        height: u16,
+        now: DateTime<Utc>,
+    ) -> Buffer {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| render(frame, snapshot, state, Duration::from_secs(300), now))
+            .expect("draw");
+        terminal.backend().buffer().clone()
+    }
+
+    fn is_accent_gap(line: &str) -> bool {
+        let trimmed = line.trim_end();
+        !trimmed.is_empty() && trimmed.chars().all(|ch| ch == '▎' || ch == ' ')
+    }
+
+    fn usage_marker_cells(buffer: &Buffer) -> Vec<(u16, u16)> {
+        (0..buffer.area.height)
+            .flat_map(|y| {
+                (0..buffer.area.width)
+                    .filter(|&x| buffer[(x, y)].symbol() == "│" && buffer[(x, y)].bg != BG)
+                    .map(|x| (x, y))
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
+    fn paced_account_snapshot(
+        used: f64,
+        remaining: ChronoDuration,
+        now: DateTime<Utc>,
+    ) -> DashboardSnapshot {
+        let mut snapshot = DashboardSnapshot {
+            generated_at: now,
+            accounts: Vec::new(),
+        };
+        let mut account =
+            AccountSnapshot::empty("claude:work", "work", Provider::Claude, FetchHealth::ok());
+        account.windows.push(UsageWindow::new(
+            "five_hour",
+            "5H",
+            used,
+            Some(now + remaining),
+        ));
+        snapshot.accounts.push(account);
+        snapshot
+    }
+
+
     #[test]
     fn account_navigation_wraps_and_resets_scroll() {
         let mut state = AppState::new();
@@ -1064,4 +1140,109 @@ mod tests {
         assert!(buffer_line(&buffer, 29).contains("work"));
         assert!(!buffer_text(&buffer).contains("zoom"));
     }
+
+    #[test]
+    fn pace_marker_keeps_filled_and_empty_bar_background() {
+        let fill = GREEN;
+        let filled = usage_bar_spans(80.0, 10, Some(20.0), fill);
+        let marker = filled
+            .iter()
+            .find(|span| span.content.as_ref() == "│")
+            .expect("filled marker");
+        assert_eq!(marker.style.fg, Some(FG));
+        assert_eq!(marker.style.bg, Some(fill));
+        assert_ne!(marker.style.bg, Some(BG));
+
+        let empty = usage_bar_spans(20.0, 10, Some(80.0), fill);
+        let marker = empty
+            .iter()
+            .find(|span| span.content.as_ref() == "│")
+            .expect("empty marker");
+        assert_eq!(marker.style.fg, Some(FG));
+        assert_eq!(marker.style.bg, Some(MUTED));
+        assert_ne!(marker.style.bg, Some(BG));
+    }
+
+    #[test]
+    fn overview_and_focused_markers_keep_bar_background() {
+        let now = Utc::now();
+        let remaining = ChronoDuration::hours(2) + ChronoDuration::minutes(30);
+        let mut focused = AppState::new();
+        focused.view = ViewMode::Focused;
+
+        let filled_snapshot = paced_account_snapshot(65.0, remaining, now);
+        for state in [&AppState::new(), &focused] {
+            let buffer = draw_snapshot(&filled_snapshot, state, 160, 24, now);
+            let cells = usage_marker_cells(&buffer);
+            assert!(!cells.is_empty(), "expected pace marker");
+            for (x, y) in cells {
+                assert_eq!(buffer[(x, y)].fg, FG);
+                assert_eq!(buffer[(x, y)].bg, ORANGE);
+                assert_ne!(buffer[(x, y)].bg, BG);
+            }
+        }
+
+        let empty_snapshot = paced_account_snapshot(20.0, remaining, now);
+        for state in [&AppState::new(), &focused] {
+            let buffer = draw_snapshot(&empty_snapshot, state, 160, 24, now);
+            let cells = usage_marker_cells(&buffer);
+            assert!(!cells.is_empty(), "expected pace marker");
+            for (x, y) in cells {
+                assert_eq!(buffer[(x, y)].fg, FG);
+                assert_eq!(buffer[(x, y)].bg, MUTED);
+                assert_ne!(buffer[(x, y)].bg, BG);
+            }
+        }
+    }
+
+    #[test]
+    fn overview_spaces_rows_accounts_and_providers() {
+        let buffer = draw_overview(160, 48, &AppState::new());
+        let lines = (0..buffer.area.height)
+            .map(|y| buffer_line(&buffer, y).trim_end().to_string())
+            .collect::<Vec<_>>();
+        let claude = lines
+            .iter()
+            .position(|line| line.contains("CLAUDE"))
+            .expect("claude");
+        let codex = lines
+            .iter()
+            .position(|line| line.contains("CODEX"))
+            .expect("codex");
+        let grok = lines
+            .iter()
+            .position(|line| line.contains("GROK"))
+            .expect("grok");
+        assert!(claude < codex && codex < grok);
+        assert!(lines[codex - 1].is_empty());
+        assert!(lines[codex - 2].is_empty());
+        assert!(lines[grok - 1].is_empty());
+        assert!(lines[grok - 2].is_empty());
+        assert!(is_accent_gap(&lines[claude + 1]));
+
+        let claude_rows = ((claude + 1)..codex)
+            .filter(|&index| lines[index].contains("5H") || lines[index].contains("WEEKLY"))
+            .collect::<Vec<_>>();
+        assert_eq!(claude_rows, [claude + 2, claude + 4, claude + 7, claude + 9]);
+        assert!(is_accent_gap(&lines[claude_rows[0] + 1]));
+        assert!(is_accent_gap(&lines[claude_rows[1] + 1]));
+        assert!(is_accent_gap(&lines[claude_rows[1] + 2]));
+    }
+
+    #[test]
+    fn overview_scrolls_expanded_layout() {
+        let mut state = AppState::new();
+        let top = draw_overview(160, 16, &state);
+        let top_text = buffer_text(&top);
+        assert!(top_text.contains("CLAUDE"));
+        assert!(!top_text.contains("GROK"));
+
+        state.scroll = 18;
+        let scrolled = draw_overview(160, 16, &state);
+        let scrolled_text = buffer_text(&scrolled);
+        assert!(buffer_line(&scrolled, 0).contains("aiwatch"));
+        assert!(scrolled_text.contains("GROK") || scrolled_text.contains("CODEX"));
+        assert!(!scrolled_text.contains("CLAUDE") || scrolled_text.contains("CODEX"));
+    }
+
 }
