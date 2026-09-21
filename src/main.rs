@@ -107,8 +107,15 @@ async fn main() -> Result<()> {
         if cli.json {
             println!("{}", serde_json::to_string_pretty(&snapshot)?);
         } else {
-            let width = terminal::size().map_or(100, |(width, _)| width as usize);
-            print!("{}", output::render_text(&snapshot, width));
+            let width = terminal::size().map_or(160, |(width, _)| width as usize);
+            print!(
+                "{}",
+                output::render_text(
+                    &snapshot,
+                    width,
+                    Duration::from_secs(config.poll_interval_secs)
+                )
+            );
         }
         return Ok(());
     }
@@ -160,13 +167,12 @@ async fn present_demo(snapshot: DashboardSnapshot, cli: &Cli) -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&snapshot)?);
         return Ok(());
     }
+    let poll_interval = Duration::from_secs(cli.interval.unwrap_or(60).max(60));
     if cli.once {
-        let width = terminal::size().map_or(100, |(width, _)| width as usize);
-        print!("{}", output::render_text(&snapshot, width));
+        let width = terminal::size().map_or(160, |(width, _)| width as usize);
+        print!("{}", output::render_text(&snapshot, width, poll_interval));
         return Ok(());
     }
-
-    let poll_interval = Duration::from_secs(cli.interval.unwrap_or(60).max(60));
     let (_snapshot_guard, snapshot_rx) = watch::channel(snapshot);
     let (refresh_tx, _refresh_guard) = mpsc::channel(1);
     ui::run(snapshot_rx, refresh_tx, poll_interval).await
