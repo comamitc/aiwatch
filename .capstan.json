@@ -1,0 +1,14 @@
+{
+  "primary": {"harness": "grok", "model": null, "effort": "high"},
+  "secondary": {"harness": "codex", "model": null, "effort": "high"},
+  "fallback": {"harness": "claude", "model": null, "effort": null},
+  "recovery": {
+    "transient_retries": 3,
+    "same_failure_attempts": 2,
+    "run_wall_timeout_min": 360,
+    "max_cost_usd": null
+  },
+  "worker_timeout_min": 60,
+  "ci_timeout_min": 45,
+  "unsafe_autonomy": false
+}
