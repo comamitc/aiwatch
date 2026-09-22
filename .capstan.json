@@ -1,7 +1,7 @@
 {
-  "primary": {"harness": "grok", "model": null, "effort": "high"},
-  "secondary": {"harness": "codex", "model": null, "effort": "high"},
-  "fallback": {"harness": "claude", "model": null, "effort": null},
+  "primary": {"harness": "grok", "model": "grok-4.7", "effort": "high"},
+  "secondary": {"harness": "codex", "model": "gpt-5.6-sol", "effort": "high"},
+  "fallback": {"harness": "claude", "model": "claude-fable-5-1", "effort": null},
   "recovery": {
     "transient_retries": 3,
     "same_failure_attempts": 2,
