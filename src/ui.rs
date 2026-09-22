@@ -27,10 +27,10 @@ use crate::{
     output::{format_reset, health_text},
 };
 
-const BG: Color = Color::Rgb(0x15, 0x15, 0x1e);
-const FG: Color = Color::Rgb(0xc6, 0xc0, 0xd8);
-const SHADE: Color = Color::Rgb(0x1c, 0x1c, 0x28);
-const MUTED: Color = Color::Rgb(0x9c, 0xa3, 0xaf);
+const BG: Color = Color::Reset;
+const FG: Color = Color::Reset;
+const SHADE: Color = Color::Reset;
+const MUTED: Color = Color::DarkGray;
 const CLAUDE: Color = Color::Rgb(0xe8, 0xa0, 0x7c);
 const CODEX: Color = Color::Rgb(0x5e, 0xea, 0xd4);
 const GROK: Color = Color::Rgb(0x93, 0xc5, 0xfd);
