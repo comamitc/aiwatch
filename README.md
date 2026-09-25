@@ -8,7 +8,7 @@ Early public release. The quota endpoints used by the official clients are not p
 
 ## Features
 
-- Compact all-account provider dashboard with an optional focused account view
+- Per-account quota cards for Claude, Codex, and Grok, with an optional focused account view
 - Claude five-hour, weekly, and model-scoped weekly windows
 - Codex primary five-hour and secondary weekly windows
 - Grok weekly or monthly included allowance and product breakdown
@@ -36,7 +36,7 @@ aiwatch --demo
 ## Usage
 
 ```console
-aiwatch                       # interactive dashboard
+aiwatch                       # graphical account cards, one per provider account
 aiwatch --once                # static terminal snapshot
 aiwatch --json                # one machine-readable snapshot
 aiwatch --provider claude     # one provider
@@ -44,6 +44,7 @@ aiwatch --provider claude,codex
 aiwatch --interval 600        # provider polling interval, minimum 300s
 aiwatch --no-history          # disable local SQLite snapshots
 aiwatch --demo --once         # safe static preview
+aiwatch --tui                 # terminal UI instead of the panel
 ```
 
 Interactive keys:
@@ -165,7 +166,7 @@ Managed profiles are included in addition to explicitly configured accounts. The
 - Token or message denominators are not shown unless a provider reports them authoritatively.
 - Percentages from differently sized accounts are never averaged into a misleading combined quota.
 
-The dashboard's nearest-cap value is the soonest future reset among currently visible windows. Usage bars and percentages are colored from each window's own remaining-time pace.
+The summary strip on each card is that account's weekly window. `empty in` is the soonest projected time until a visible window reaches 100% at its current burn, and only when that happens before the window resets. Session meters are mint. Weekly, model-scoped, and monthly meters are gold. The cyan tick is that window's linear pace: it sits in the fill when usage is ahead of pace and on the empty track when usage is behind. The time at the right of each meter is the provider reset countdown, not the empty projection.
 
 ## Security model
 

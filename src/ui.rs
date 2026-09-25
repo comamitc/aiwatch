@@ -14,29 +14,28 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph},
+    widgets::{Block, Paragraph},
 };
 use tokio::sync::{mpsc, watch};
 
 use crate::{
-    dashboard::{
-        self, ColumnLayout, OverviewModel, PACE_LEGEND, PaceBand, ProfileFilter, ProviderSection,
-        WindowRow,
-    },
-    model::{AccountSnapshot, DashboardSnapshot, HealthState, Provider, UsageWindow},
-    output::{format_reset, health_text},
+    dashboard::{self, MeterTone, ProfileFilter},
+    model::{AccountSnapshot, DashboardSnapshot, HealthState, Provider},
 };
 
-const BG: Color = Color::Reset;
-const FG: Color = Color::Reset;
-const SHADE: Color = Color::Reset;
-const MUTED: Color = Color::DarkGray;
+const BG: Color = Color::Rgb(0x1e, 0x23, 0x32);
+const FG: Color = Color::Rgb(0xc5, 0xcd, 0xd8);
+const TRACK: Color = Color::Rgb(0x2e, 0x34, 0x44);
+const GOLD: Color = Color::Rgb(0xd4, 0xc0, 0x78);
+const GOLD_FILL: Color = Color::Rgb(0xc9, 0xb1, 0x5c);
+const MINT: Color = Color::Rgb(0x6f, 0xcb, 0x9f);
+const CYAN: Color = Color::Rgb(0x4e, 0xcd, 0xc4);
+const MUTED: Color = Color::Rgb(0x7a, 0x84, 0x96);
+const META: Color = Color::Rgb(0x8b, 0x93, 0xa7);
 const CLAUDE: Color = Color::Rgb(0xe8, 0xa0, 0x7c);
 const CODEX: Color = Color::Rgb(0x5e, 0xea, 0xd4);
 const GROK: Color = Color::Rgb(0x93, 0xc5, 0xfd);
-const GREEN: Color = Color::Rgb(0x4a, 0xde, 0x80);
 const YELLOW: Color = Color::Rgb(0xea, 0xb3, 0x08);
-const ORANGE: Color = Color::Rgb(0xe0, 0x9a, 0x3e);
 const RED: Color = Color::Rgb(0xf8, 0x71, 0x71);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -248,223 +247,228 @@ fn render(
 ) {
     let area = frame.area();
     frame.render_widget(Block::default().style(Style::default().fg(FG).bg(BG)), area);
+    let [header, body, footer] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Min(6),
+        Constraint::Length(1),
+    ])
+    .areas(area);
+    render_status(frame, snapshot, state, poll, header);
     match state.view {
-        ViewMode::Summary => render_overview(frame, snapshot, state, poll, now, area),
-        ViewMode::Focused => {
-            let [header, body, footer] = Layout::vertical([
-                Constraint::Length(2),
-                Constraint::Min(6),
-                Constraint::Length(1),
-            ])
-            .areas(area);
-            let model = overview_model(snapshot, state, poll, now, area.width as usize);
-            render_header(frame, &model, header);
-            render_focused_body(frame, snapshot, state, now, body);
-            render_footer(frame, state, footer);
-        }
+        ViewMode::Summary => render_overview_body(frame, snapshot, state, now, body),
+        ViewMode::Focused => render_focused_body(frame, snapshot, state, now, body),
     }
+    render_footer(frame, state, footer);
 }
 
-fn overview_model<'a>(
-    snapshot: &'a DashboardSnapshot,
-    state: &AppState,
-    poll: Duration,
-    now: DateTime<Utc>,
-    width: usize,
-) -> OverviewModel<'a> {
-    dashboard::build_overview(
-        snapshot,
-        width,
-        poll,
-        state.provider,
-        state.profile,
-        state.weekly_only,
-        now,
-    )
-}
-
-fn render_overview(
+fn render_status(
     frame: &mut Frame<'_>,
     snapshot: &DashboardSnapshot,
     state: &AppState,
     poll: Duration,
-    now: DateTime<Utc>,
     area: Rect,
 ) {
-    let [header, columns, body, legend, footer] = Layout::vertical([
-        Constraint::Length(2),
-        Constraint::Length(1),
-        Constraint::Min(4),
-        Constraint::Length(1),
-        Constraint::Length(1),
-    ])
-    .areas(area);
-    let model = overview_model(snapshot, state, poll, now, area.width as usize);
-    render_header(frame, &model, header);
-    render_column_headers(frame, model.layout, columns);
-    render_overview_body(frame, &model, state.scroll, body);
+    let count = dashboard::visible_accounts(snapshot, state.provider, state.profile).len();
     frame.render_widget(
-        Paragraph::new(PACE_LEGEND).style(Style::default().fg(MUTED).bg(BG)),
-        legend,
-    );
-    render_footer(frame, state, footer);
-}
-
-fn render_header(frame: &mut Frame<'_>, model: &OverviewModel<'_>, area: Rect) {
-    let [top, bottom] =
-        Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).areas(area);
-    frame.render_widget(
-        Paragraph::new(model.header_line1.clone()).style(Style::default().fg(FG).bg(BG)),
-        top,
-    );
-    frame.render_widget(
-        Paragraph::new(model.header_line2.clone()).style(Style::default().fg(MUTED).bg(BG)),
-        bottom,
-    );
-}
-
-fn render_column_headers(frame: &mut Frame<'_>, layout: ColumnLayout, area: Rect) {
-    frame.render_widget(
-        Paragraph::new(Line::from(column_header_spans(layout)))
-            .style(Style::default().fg(MUTED).bg(SHADE)),
+        Paragraph::new(dashboard::status_line(count, state.profile, poll))
+            .style(Style::default().fg(MUTED).bg(BG)),
         area,
     );
 }
 
-fn column_header_spans(layout: ColumnLayout) -> Vec<Span<'static>> {
-    let mut spans = vec![
-        cell_span("", layout.accent, MUTED, SHADE),
-        cell_span("ACCOUNT", layout.account, MUTED, SHADE),
-        Span::styled(" ", Style::default().bg(SHADE)),
-        cell_span("WINDOW", layout.window, MUTED, SHADE),
-        Span::styled(" ", Style::default().bg(SHADE)),
-        cell_span("USAGE", layout.usage, MUTED, SHADE),
-        Span::styled(" ", Style::default().bg(SHADE)),
-        cell_span(layout.used_cap_header(), layout.used_cap, MUTED, SHADE),
-        Span::styled(" ", Style::default().bg(SHADE)),
-        cell_span("RESETS", layout.resets, MUTED, SHADE),
-    ];
-    if layout.show_spark {
-        spans.push(Span::styled(" ", Style::default().bg(SHADE)));
-        spans.push(cell_span("7D", layout.spark, MUTED, SHADE));
-    }
-    spans
-}
-
-fn render_overview_body(frame: &mut Frame<'_>, model: &OverviewModel<'_>, scroll: u16, area: Rect) {
+fn render_overview_body(
+    frame: &mut Frame<'_>,
+    snapshot: &DashboardSnapshot,
+    state: &AppState,
+    now: DateTime<Utc>,
+    area: Rect,
+) {
+    let cards = dashboard::account_cards(
+        snapshot,
+        state.provider,
+        state.profile,
+        state.weekly_only,
+        now,
+    );
+    let width = area.width as usize;
     let mut lines = Vec::new();
-    if model.sections.is_empty() {
+    if cards.is_empty() {
         lines.push(Line::from(Span::styled(
             "No matching accounts. Configure credentials or clear the provider filter.",
-            Style::default().fg(YELLOW),
+            Style::default().fg(YELLOW).bg(BG),
         )));
     }
-    for (section_index, section) in model.sections.iter().enumerate() {
-        if section_index > 0 {
-            lines.push(Line::from(""));
-            lines.push(Line::from(""));
+    for (index, card) in cards.iter().enumerate() {
+        if index > 0 {
+            lines.push(blank_line());
         }
-        lines.push(provider_header_line(
-            section,
-            model.layout,
-            area.width as usize,
-        ));
-        for (row_index, row) in section.rows.iter().enumerate() {
-            let blanks = if row_index > 0 && row.first_for_account {
-                2
-            } else {
-                1
-            };
-            for _ in 0..blanks {
-                lines.push(provider_accent_blank(section.provider));
-            }
-            lines.push(window_row_line(row, model.layout, section.provider));
-        }
+        lines.extend(card_lines(card, width));
     }
     frame.render_widget(
         Paragraph::new(lines)
             .style(Style::default().fg(FG).bg(BG))
-            .scroll((scroll, 0)),
+            .scroll((state.scroll, 0)),
         area,
     );
 }
 
-fn provider_accent_blank(provider: Provider) -> Line<'static> {
-    Line::from(Span::styled(
-        "▎",
-        Style::default().fg(provider_accent(provider)).bg(BG),
-    ))
+fn card_lines(card: &dashboard::AccountCard<'_>, width: usize) -> Vec<Line<'static>> {
+    let mut lines = vec![identity_line(card, width)];
+    if let Some(summary) = &card.summary {
+        lines.push(summary_line(summary, width));
+    }
+    if card.meters.is_empty() {
+        if let Some(notice) = &card.notice {
+            lines.push(Line::from(Span::styled(
+                notice.clone(),
+                Style::default()
+                    .fg(health_color(card.account.health.state))
+                    .bg(BG),
+            )));
+        }
+    } else {
+        lines.push(blank_line());
+        for meter in &card.meters {
+            lines.push(meter_line(meter, width));
+        }
+    }
+    lines
 }
 
-fn provider_header_line(
-    section: &ProviderSection<'_>,
-    layout: ColumnLayout,
-    width: usize,
-) -> Line<'static> {
-    let accent = provider_accent(section.provider);
-    let left = dashboard::provider_header_text(section);
-    let details = section.details.clone();
-    let mut spans = vec![Span::styled("▎", Style::default().fg(accent).bg(SHADE))];
-    let remaining = width.saturating_sub(layout.accent);
-    if details.is_empty() {
+fn identity_line(card: &dashboard::AccountCard<'_>, width: usize) -> Line<'static> {
+    let dot = if card.account.health.state == HealthState::Ok {
+        provider_accent(card.account.provider)
+    } else {
+        health_color(card.account.health.state)
+    };
+    let mut spans = vec![
+        Span::styled("●", Style::default().fg(dot).bg(BG)),
+        Span::styled(format!(" {}", card.title), Style::default().fg(FG).bg(BG)),
+    ];
+    let mut used = 2 + card.title.chars().count();
+    if let Some(name) = &card.account_name {
+        used += 1 + name.chars().count();
         spans.push(Span::styled(
-            dashboard::pad_cell(&left, remaining),
-            Style::default()
-                .fg(FG)
-                .bg(SHADE)
-                .add_modifier(Modifier::BOLD),
+            format!(" {name}"),
+            Style::default().fg(META).bg(BG),
         ));
-        return Line::from(spans);
     }
-    let left_width = left.chars().count();
-    let details_width = details.chars().count();
-    let gap = remaining.saturating_sub(left_width + details_width).max(1);
+    let (plan, auth) = (card.plan.clone(), card.auth);
+    let right_width = plan.as_ref().map_or(2 + auth.chars().count(), |plan| {
+        plan.chars().count() + 3 + auth.chars().count()
+    });
     spans.push(Span::styled(
-        left,
-        Style::default()
-            .fg(FG)
-            .bg(SHADE)
-            .add_modifier(Modifier::BOLD),
+        " ".repeat(width.saturating_sub(used + right_width)),
+        Style::default().bg(BG),
     ));
-    spans.push(Span::styled(" ".repeat(gap), Style::default().bg(SHADE)));
-    spans.push(Span::styled(details, Style::default().fg(MUTED).bg(SHADE)));
+    if let Some(plan) = plan {
+        spans.push(Span::styled(plan, Style::default().fg(META).bg(BG)));
+        spans.push(Span::styled(
+            " ● ",
+            Style::default()
+                .fg(provider_accent(card.account.provider))
+                .bg(BG),
+        ));
+    } else {
+        spans.push(Span::styled(
+            "● ",
+            Style::default()
+                .fg(provider_accent(card.account.provider))
+                .bg(BG),
+        ));
+    }
+    spans.push(Span::styled(
+        auth.to_string(),
+        Style::default().fg(META).bg(BG),
+    ));
     Line::from(spans)
 }
 
-fn window_row_line(row: &WindowRow<'_>, layout: ColumnLayout, provider: Provider) -> Line<'static> {
-    let band = row
-        .used_percent
-        .map(|used| dashboard::pace_band(used, row.pace))
-        .unwrap_or(PaceBand::Gray);
-    let color = band_color(band);
-    let bar = usage_bar_spans(
-        row.used_percent.unwrap_or(0.0),
-        layout.usage,
-        row.pace,
-        color,
+fn summary_line(summary: &dashboard::CardSummary, width: usize) -> Line<'static> {
+    let label = format!(
+        "{} {}",
+        dashboard::percent_label(summary.percent),
+        summary.label
     );
     let mut spans = vec![
-        Span::styled("▎", Style::default().fg(provider_accent(provider)).bg(BG)),
-        Span::styled(row.account_cell.clone(), Style::default().fg(FG).bg(BG)),
-        Span::raw(" "),
-        Span::styled(row.window_cell.clone(), Style::default().fg(MUTED).bg(BG)),
-        Span::raw(" "),
+        Span::styled(label, Style::default().fg(GOLD).bg(BG)),
+        Span::styled(" ", Style::default().bg(BG)),
     ];
-    spans.extend(bar);
-    spans.extend([
-        Span::raw(" "),
-        Span::styled(row.used_cap_cell.clone(), Style::default().fg(color).bg(BG)),
-        Span::raw(" "),
-        Span::styled(row.resets_cell.clone(), Style::default().fg(MUTED).bg(BG)),
-    ]);
-    if layout.show_spark {
-        spans.push(Span::raw(" "));
+    let bar_width = dashboard::SUMMARY_BAR_WIDTH.min(width.saturating_sub(16));
+    spans.extend(usage_bar_spans(
+        summary.percent,
+        bar_width,
+        summary.pace,
+        tone_color(summary.tone),
+    ));
+    let right = format!("empty in {}", summary.empty_in.as_deref().unwrap_or("—"));
+    let used = spans
+        .iter()
+        .map(|span| span.content.chars().count())
+        .sum::<usize>();
+    spans.push(Span::styled(
+        " ".repeat(width.saturating_sub(used + right.chars().count())),
+        Style::default().bg(BG),
+    ));
+    spans.push(Span::styled(right, Style::default().fg(GOLD).bg(BG)));
+    Line::from(spans)
+}
+
+fn meter_line(meter: &dashboard::CardMeter, width: usize) -> Line<'static> {
+    let columns = dashboard::meter_columns(width);
+    let mut spans = vec![Span::styled(
+        dashboard::pad_cell(&meter.label, columns.label),
+        Style::default().fg(MUTED).bg(BG),
+    )];
+    if columns.bar > 0 {
+        spans.push(Span::styled(" ", Style::default().bg(BG)));
+        spans.extend(usage_bar_spans(
+            meter.used_percent,
+            columns.bar,
+            meter.pace,
+            tone_color(meter.tone),
+        ));
+    }
+    if columns.percent > 0 {
+        spans.push(Span::styled(" ", Style::default().bg(BG)));
         spans.push(Span::styled(
-            row.spark_cell.clone(),
+            dashboard::pad_cell(
+                &dashboard::percent_label(meter.used_percent),
+                columns.percent,
+            ),
+            Style::default().fg(GOLD).bg(BG),
+        ));
+    }
+    if columns.time > 0 {
+        spans.push(Span::styled(" ", Style::default().bg(BG)));
+        spans.push(Span::styled(
+            align_right(&meter.reset, columns.time),
             Style::default().fg(MUTED).bg(BG),
         ));
     }
     Line::from(spans)
+}
+
+fn blank_line() -> Line<'static> {
+    Line::from(Span::styled(" ", Style::default().bg(BG)))
+}
+
+fn align_right(text: &str, width: usize) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() >= width {
+        return chars.into_iter().take(width).collect();
+    }
+    let mut line = " ".repeat(width - chars.len());
+    line.extend(chars);
+    line
+}
+
+fn tone_color(tone: MeterTone) -> Color {
+    match tone {
+        MeterTone::Session => MINT,
+        MeterTone::Allowance => GOLD_FILL,
+        MeterTone::Unknown => MUTED,
+    }
 }
 
 fn usage_bar_spans(
@@ -482,11 +486,11 @@ fn usage_bar_spans(
     let mut index = 0;
     while index < width {
         if marker == Some(index) {
-            let marker_bg = if index < filled { fill } else { MUTED };
+            let marker_bg = if index < filled { fill } else { TRACK };
             spans.push(Span::styled(
                 "│",
                 Style::default()
-                    .fg(FG)
+                    .fg(CYAN)
                     .bg(marker_bg)
                     .add_modifier(Modifier::BOLD),
             ));
@@ -506,19 +510,12 @@ fn usage_bar_spans(
             ));
         } else {
             spans.push(Span::styled(
-                "░".repeat(run),
-                Style::default().fg(MUTED).bg(BG),
+                "█".repeat(run),
+                Style::default().fg(TRACK).bg(BG),
             ));
         }
     }
     spans
-}
-
-fn cell_span(text: &str, width: usize, fg: Color, bg: Color) -> Span<'static> {
-    Span::styled(
-        dashboard::pad_cell(text, width),
-        Style::default().fg(fg).bg(bg),
-    )
 }
 
 fn provider_accent(provider: Provider) -> Color {
@@ -527,63 +524,6 @@ fn provider_accent(provider: Provider) -> Color {
         Provider::Codex => CODEX,
         Provider::Grok => GROK,
     }
-}
-
-fn band_color(band: PaceBand) -> Color {
-    match band {
-        PaceBand::Green => GREEN,
-        PaceBand::Yellow => YELLOW,
-        PaceBand::Orange => ORANGE,
-        PaceBand::Red => RED,
-        PaceBand::Gray => MUTED,
-    }
-}
-
-fn render_focused_body(
-    frame: &mut Frame<'_>,
-    snapshot: &DashboardSnapshot,
-    state: &AppState,
-    now: DateTime<Utc>,
-    area: Rect,
-) {
-    let Some((index, count, account)) = selected_account(snapshot, state) else {
-        frame.render_widget(
-            Paragraph::new(
-                "No matching accounts. Configure credentials or clear the provider filter.",
-            )
-            .style(Style::default().fg(YELLOW).bg(BG)),
-            area,
-        );
-        return;
-    };
-
-    let content_width = area.width.saturating_sub(4) as usize;
-    let lines = account_card_lines(account, index, count, content_width, state.weekly_only, now);
-    let title = Line::from(vec![
-        Span::styled(
-            format!(" {} ", account.provider.label()),
-            Style::default()
-                .fg(provider_accent(account.provider))
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            format!("/ {} ", account.name),
-            Style::default().fg(FG).add_modifier(Modifier::BOLD),
-        ),
-    ]);
-    frame.render_widget(
-        Paragraph::new(lines)
-            .style(Style::default().fg(FG).bg(BG))
-            .scroll((state.scroll, 0))
-            .block(
-                Block::default()
-                    .borders(Borders::TOP)
-                    .border_style(Style::default().fg(MUTED))
-                    .title(title)
-                    .padding(ratatui::widgets::Padding::horizontal(2)),
-            ),
-        area,
-    );
 }
 
 fn matching_account_count(snapshot: &DashboardSnapshot, state: &AppState) -> usize {
@@ -605,106 +545,55 @@ fn selected_account<'a>(
         .map(|account| (index, accounts.len(), account))
 }
 
-fn account_card_lines(
-    account: &AccountSnapshot,
-    index: usize,
-    count: usize,
-    width: usize,
-    weekly_only: bool,
+fn render_focused_body(
+    frame: &mut Frame<'_>,
+    snapshot: &DashboardSnapshot,
+    state: &AppState,
     now: DateTime<Utc>,
-) -> Vec<Line<'static>> {
-    let status_color = health_color(account.health.state);
-    let meta = format!(
-        "Updated {} · {}",
-        dashboard::age_text(now - account.fetched_at),
-        health_text(account.health.state, account.health.status_code)
-    );
-    let position = account.plan.as_deref().map_or_else(
-        || format!("{} of {count}", index + 1),
-        |plan| format!("{plan} · {} of {count}", index + 1),
-    );
-    let mut lines = vec![
-        aligned_line(
-            meta,
-            position,
-            width,
-            Style::default().fg(status_color),
-            Style::default().fg(FG).add_modifier(Modifier::BOLD),
-        ),
-        divider_line(width),
-        Line::from(""),
-    ];
+    area: Rect,
+) {
+    let Some((_, _, account)) = selected_account(snapshot, state) else {
+        frame.render_widget(
+            Paragraph::new(
+                "No matching accounts. Configure credentials or clear the provider filter.",
+            )
+            .style(Style::default().fg(YELLOW).bg(BG)),
+            area,
+        );
+        return;
+    };
 
-    let mut rendered_window = false;
+    let width = area.width as usize;
+    let card = dashboard::account_card(account, state.weekly_only, now);
+    let mut lines = card_lines(&card, width);
+    if !account.details.is_empty() {
+        lines.push(blank_line());
+        lines.push(Line::from(Span::styled(
+            "details",
+            Style::default().fg(MUTED).bg(BG),
+        )));
+        lines.extend(detail_grid_lines(account, width));
+    }
     for window in account
         .windows
         .iter()
-        .filter(|window| dashboard::window_is_weekly_view(window, weekly_only))
+        .filter(|window| dashboard::window_is_weekly_view(window, state.weekly_only))
     {
-        rendered_window = true;
-        lines.extend(window_section(window, width, now));
-        lines.push(Line::from(""));
+        if window.history.iter().any(|value| *value > 0) {
+            lines.push(blank_line());
+            lines.push(Line::from(Span::styled(
+                format!("{} history", dashboard::meter_label(window)),
+                Style::default().fg(MUTED).bg(BG),
+            )));
+            lines.extend(history_chart_lines(&window.history, width));
+        }
     }
-    if !rendered_window {
-        let message = account.health.message.as_deref().unwrap_or(if weekly_only {
-            "No weekly usage window reported"
-        } else {
-            "Quota unavailable"
-        });
-        lines.push(Line::from(Span::styled(
-            message.to_string(),
-            Style::default().fg(status_color),
-        )));
-    }
-
-    if !account.details.is_empty() {
-        lines.push(divider_line(width));
-        lines.push(Line::from(Span::styled(
-            "DETAILS",
-            Style::default().fg(MUTED).add_modifier(Modifier::BOLD),
-        )));
-        lines.push(Line::from(""));
-        lines.extend(detail_grid_lines(account, width));
-    }
-    lines
-}
-
-fn window_section(window: &UsageWindow, width: usize, now: DateTime<Utc>) -> Vec<Line<'static>> {
-    let pace = window.pace_used_percent(now);
-    let color = band_color(dashboard::pace_band(window.used_percent, pace));
-    let bar_width = width.saturating_sub(20).clamp(4, 80);
-    let mut bar = vec![Span::styled(
-        "usage ",
-        Style::default().fg(MUTED).add_modifier(Modifier::BOLD),
-    )];
-    bar.extend(usage_bar_spans(window.used_percent, bar_width, pace, color));
-    bar.push(Span::styled(
-        format!(" {:>5.1}% used", window.used_percent),
-        Style::default().fg(color).add_modifier(Modifier::BOLD),
-    ));
-    let mut lines = vec![
-        aligned_line(
-            window.label.clone(),
-            format_reset(window.resets_at),
-            width,
-            Style::default().fg(FG).add_modifier(Modifier::BOLD),
-            Style::default().fg(MUTED),
-        ),
-        Line::from(bar),
-    ];
-
-    if window.history.iter().any(|value| *value > 0) {
-        let peak = window.history.iter().copied().max().unwrap_or_default();
-        lines.push(aligned_line(
-            "7D PEAKS".to_string(),
-            format!("peak {peak}%"),
-            width,
-            Style::default().fg(MUTED).add_modifier(Modifier::BOLD),
-            Style::default().fg(MUTED),
-        ));
-        lines.extend(history_chart_lines(&window.history, width));
-    }
-    lines
+    frame.render_widget(
+        Paragraph::new(lines)
+            .style(Style::default().fg(FG).bg(BG))
+            .scroll((state.scroll, 0)),
+        area,
+    );
 }
 
 fn history_chart_lines(history: &[u64], width: usize) -> Vec<Line<'static>> {
@@ -796,13 +685,9 @@ fn aligned_line(
     ])
 }
 
-fn divider_line(width: usize) -> Line<'static> {
-    Line::from(Span::styled("─".repeat(width), Style::default().fg(MUTED)))
-}
-
 fn health_color(state: HealthState) -> Color {
     match state {
-        HealthState::Ok => GREEN,
+        HealthState::Ok => MINT,
         HealthState::Stale => YELLOW,
         HealthState::AuthenticationRequired | HealthState::RateLimited | HealthState::Error => RED,
     }
@@ -883,11 +768,6 @@ mod tests {
             .draw(|frame| render(frame, snapshot, state, Duration::from_secs(300), now))
             .expect("draw");
         terminal.backend().buffer().clone()
-    }
-
-    fn is_accent_gap(line: &str) -> bool {
-        let trimmed = line.trim_end();
-        !trimmed.is_empty() && trimmed.chars().all(|ch| ch == '▎' || ch == ' ')
     }
 
     fn usage_marker_cells(buffer: &Buffer) -> Vec<(u16, u16)> {
@@ -1022,228 +902,138 @@ mod tests {
     }
 
     #[test]
-    fn overview_160x30_is_compact_table_with_theme_and_legend() {
-        let buffer = draw_overview(160, 30, &AppState::new());
+    fn overview_is_one_card_per_account() {
+        let buffer = draw_overview(160, 40, &AppState::new());
         let text = buffer_text(&buffer);
-        let line0 = buffer_line(&buffer, 0);
-        let line1 = buffer_line(&buffer, 1);
-        let columns = buffer_line(&buffer, 2);
-        assert!(line0.contains("aiwatch"));
-        assert!(line0.contains(env!("CARGO_PKG_VERSION")));
-        assert!(line0.contains("profile all"));
-        assert!(line1.contains("poll 60s"));
-        assert!(line1.contains("nearest cap"));
-        assert!(line1.contains("freshness"));
-        assert!(line1.contains("health"));
-        assert!(columns.contains("ACCOUNT"));
-        assert!(columns.contains("WINDOW"));
-        assert!(columns.contains("USAGE"));
-        assert!(columns.contains("% USED / CAP"));
-        assert!(columns.contains("RESETS"));
-        assert!(columns.contains("7D"));
-        assert!(text.contains("CLAUDE"));
-        assert!(text.contains("CODEX"));
-        assert!(text.contains("GROK"));
-        assert!(text.contains("pace:"));
-        assert!(text.contains("on-pace marker"));
+        assert!(buffer_line(&buffer, 0).contains("aiwatch"));
+        assert!(buffer_line(&buffer, 0).contains("profile all"));
+        assert!(text.contains("claude work"));
+        assert!(text.contains("claude personal"));
+        assert!(text.contains("codex work"));
+        assert!(text.contains("grok work"));
+        assert!(text.contains("max 20x ● oauth"));
+        assert!(text.contains("session"));
+        assert!(text.contains("week"));
+        assert!(text.contains("empty in"));
+        assert!(!text.contains("ACCOUNT"));
         assert!(!text.contains("7D PEAK"));
-        assert!(!text.contains("local daily peaks"));
-        assert!(!text.contains("NEAREST CAP"));
-        let footer = buffer_line(&buffer, 29);
+        let footer = buffer_line(&buffer, 39);
         assert!(footer.contains("p profile"));
-        assert!(!footer.contains("z "));
-        assert!(!footer.contains("zoom"));
         assert_eq!(buffer[(0, 0)].bg, BG);
-        assert_eq!(buffer[(8, 0)].fg, FG);
+
         let claude_y = (0..buffer.area.height)
-            .find(|y| buffer_line(&buffer, *y).contains("CLAUDE"))
-            .expect("claude section");
+            .find(|y| buffer_line(&buffer, *y).contains("claude work"))
+            .expect("claude card");
         assert_eq!(buffer[(0, claude_y)].fg, CLAUDE);
-        assert_eq!(buffer[(0, claude_y)].bg, SHADE);
+        assert_eq!(buffer[(0, claude_y)].symbol(), "●");
     }
 
     #[test]
-    fn overview_narrow_width_drops_spark_then_cap() {
-        let mid = buffer_text(&draw_overview(140, 24, &AppState::new()));
-        let mid_header = mid.lines().nth(2).expect("columns");
-        assert!(mid_header.contains("ACCOUNT"));
-        assert!(mid_header.contains("WINDOW"));
-        assert!(mid_header.contains("% USED / CAP"));
-        assert!(mid_header.contains("RESETS"));
-        assert!(!mid_header.contains("7D"));
-
-        let narrow = buffer_text(&draw_overview(110, 24, &AppState::new()));
-        let narrow_header = narrow.lines().nth(2).expect("columns");
-        assert!(narrow_header.contains("% USED"));
-        assert!(!narrow_header.contains("CAP"));
-        assert!(!narrow_header.contains("7D"));
-        assert!(narrow_header.contains("RESETS"));
+    fn session_meter_is_mint_and_week_meter_is_gold() {
+        let buffer = draw_overview(120, 24, &AppState::new());
+        let session_y = (0..buffer.area.height)
+            .find(|y| buffer_line(&buffer, *y).trim_start().starts_with("session"))
+            .expect("session row");
+        let week_y = (0..buffer.area.height)
+            .find(|y| buffer_line(&buffer, *y).trim_start().starts_with("week"))
+            .expect("week row");
+        assert!(row_has_fg(&buffer, session_y, MINT));
+        assert!(row_has_fg(&buffer, week_y, GOLD_FILL));
+        assert!(row_has_fg(&buffer, session_y, CYAN));
+        assert!(row_has_fg(&buffer, week_y, GOLD));
     }
 
     #[test]
-    fn orange_band_uses_distinct_rgb_and_marker_is_present() {
-        let now = Utc::now();
-        let mut snapshot = DashboardSnapshot {
-            generated_at: now,
-            accounts: Vec::new(),
-        };
-        let mut account =
-            AccountSnapshot::empty("claude:work", "work", Provider::Claude, FetchHealth::ok());
-        let remaining = ChronoDuration::hours(2) + ChronoDuration::minutes(30);
-        account.windows.push(UsageWindow::new(
-            "five_hour",
-            "5H",
-            65.0,
-            Some(now + remaining),
-        ));
-        snapshot.accounts.push(account);
-        let backend = TestBackend::new(160, 16);
-        let mut terminal = Terminal::new(backend).expect("test terminal");
-        terminal
-            .draw(|frame| {
-                render(
-                    frame,
-                    &snapshot,
-                    &AppState::new(),
-                    Duration::from_secs(300),
-                    now,
-                )
-            })
-            .expect("draw");
-        let buffer = terminal.backend().buffer();
-        let text = buffer_text(buffer);
-        assert!(text.contains('│'));
-        let mut saw_orange = false;
-        for y in 0..buffer.area.height {
-            for x in 0..buffer.area.width {
-                if buffer[(x, y)].fg == ORANGE {
-                    saw_orange = true;
-                }
-                assert_ne!(buffer[(x, y)].fg, YELLOW);
-            }
-        }
-        assert!(saw_orange);
-        let window = &snapshot.accounts[0].windows[0];
-        assert_eq!(
-            dashboard::pace_band(window.used_percent, window.pace_used_percent(now)),
-            PaceBand::Orange
-        );
+    fn narrow_card_keeps_meter_label_and_percent() {
+        let text = buffer_text(&draw_overview(40, 20, &AppState::new()));
+        assert!(text.contains("session"));
+        assert!(text.contains('%'));
+        assert!(!text.contains("7D"));
     }
 
     #[test]
-    fn footer_and_header_show_profile_filter() {
-        let mut state = AppState::new();
-        state.profile = ProfileFilter::Work;
-        let buffer = draw_overview(160, 30, &state);
-        assert!(buffer_line(&buffer, 0).contains("profile work"));
-        assert!(buffer_line(&buffer, 29).contains("work"));
-        assert!(!buffer_text(&buffer).contains("zoom"));
-    }
-
-    #[test]
-    fn pace_marker_keeps_filled_and_empty_bar_background() {
-        let fill = GREEN;
-        let filled = usage_bar_spans(80.0, 10, Some(20.0), fill);
-        let marker = filled
+    fn pace_marker_is_cyan_on_fill_or_track() {
+        let fill = MINT;
+        let ahead = usage_bar_spans(80.0, 10, Some(20.0), fill);
+        let marker = ahead
             .iter()
             .find(|span| span.content.as_ref() == "│")
             .expect("filled marker");
-        assert_eq!(marker.style.fg, Some(FG));
+        assert_eq!(marker.style.fg, Some(CYAN));
         assert_eq!(marker.style.bg, Some(fill));
-        assert_ne!(marker.style.bg, Some(BG));
 
-        let empty = usage_bar_spans(20.0, 10, Some(80.0), fill);
-        let marker = empty
+        let behind = usage_bar_spans(20.0, 10, Some(80.0), fill);
+        let marker = behind
             .iter()
             .find(|span| span.content.as_ref() == "│")
-            .expect("empty marker");
-        assert_eq!(marker.style.fg, Some(FG));
-        assert_eq!(marker.style.bg, Some(MUTED));
-        assert_ne!(marker.style.bg, Some(BG));
+            .expect("track marker");
+        assert_eq!(marker.style.fg, Some(CYAN));
+        assert_eq!(marker.style.bg, Some(TRACK));
     }
 
     #[test]
-    fn overview_and_focused_markers_keep_bar_background() {
+    fn overview_and_focused_pace_ticks_follow_usage() {
         let now = Utc::now();
         let remaining = ChronoDuration::hours(2) + ChronoDuration::minutes(30);
         let mut focused = AppState::new();
         focused.view = ViewMode::Focused;
 
-        let filled_snapshot = paced_account_snapshot(65.0, remaining, now);
+        let ahead = paced_account_snapshot(65.0, remaining, now);
         for state in [&AppState::new(), &focused] {
-            let buffer = draw_snapshot(&filled_snapshot, state, 160, 24, now);
+            let buffer = draw_snapshot(&ahead, state, 160, 16, now);
             let cells = usage_marker_cells(&buffer);
             assert!(!cells.is_empty(), "expected pace marker");
             for (x, y) in cells {
-                assert_eq!(buffer[(x, y)].fg, FG);
-                assert_eq!(buffer[(x, y)].bg, ORANGE);
-                assert_ne!(buffer[(x, y)].bg, BG);
+                assert_eq!(buffer[(x, y)].fg, CYAN);
+                assert_eq!(buffer[(x, y)].bg, MINT);
             }
         }
 
-        let empty_snapshot = paced_account_snapshot(20.0, remaining, now);
+        let behind = paced_account_snapshot(20.0, remaining, now);
         for state in [&AppState::new(), &focused] {
-            let buffer = draw_snapshot(&empty_snapshot, state, 160, 24, now);
+            let buffer = draw_snapshot(&behind, state, 160, 16, now);
             let cells = usage_marker_cells(&buffer);
             assert!(!cells.is_empty(), "expected pace marker");
             for (x, y) in cells {
-                assert_eq!(buffer[(x, y)].fg, FG);
-                assert_eq!(buffer[(x, y)].bg, MUTED);
-                assert_ne!(buffer[(x, y)].bg, BG);
+                assert_eq!(buffer[(x, y)].fg, CYAN);
+                assert_eq!(buffer[(x, y)].bg, TRACK);
             }
         }
     }
 
     #[test]
-    fn overview_spaces_rows_accounts_and_providers() {
+    fn cards_are_separated_and_scroll() {
         let buffer = draw_overview(160, 48, &AppState::new());
         let lines = (0..buffer.area.height)
             .map(|y| buffer_line(&buffer, y).trim_end().to_string())
             .collect::<Vec<_>>();
-        let claude = lines
+        let first = lines
             .iter()
-            .position(|line| line.contains("CLAUDE"))
-            .expect("claude");
-        let codex = lines
+            .position(|line| line.contains("claude work"))
+            .expect("first card");
+        let second = lines
             .iter()
-            .position(|line| line.contains("CODEX"))
-            .expect("codex");
-        let grok = lines
-            .iter()
-            .position(|line| line.contains("GROK"))
-            .expect("grok");
-        assert!(claude < codex && codex < grok);
-        assert!(lines[codex - 1].is_empty());
-        assert!(lines[codex - 2].is_empty());
-        assert!(lines[grok - 1].is_empty());
-        assert!(lines[grok - 2].is_empty());
-        assert!(is_accent_gap(&lines[claude + 1]));
-
-        let claude_rows = ((claude + 1)..codex)
-            .filter(|&index| lines[index].contains("5H") || lines[index].contains("WEEKLY"))
-            .collect::<Vec<_>>();
-        assert_eq!(
-            claude_rows,
-            [claude + 2, claude + 4, claude + 7, claude + 9]
+            .position(|line| line.contains("claude personal"))
+            .expect("second card");
+        assert!(lines[second - 1].is_empty());
+        assert!(lines[first + 1].contains("week") || lines[first + 1].contains("empty in"));
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.trim_start().starts_with("session"))
         );
-        assert!(is_accent_gap(&lines[claude_rows[0] + 1]));
-        assert!(is_accent_gap(&lines[claude_rows[1] + 1]));
-        assert!(is_accent_gap(&lines[claude_rows[1] + 2]));
-    }
 
-    #[test]
-    fn overview_scrolls_expanded_layout() {
         let mut state = AppState::new();
-        let top = draw_overview(160, 16, &state);
-        let top_text = buffer_text(&top);
-        assert!(top_text.contains("CLAUDE"));
-        assert!(!top_text.contains("GROK"));
-
-        state.scroll = 18;
-        let scrolled = draw_overview(160, 16, &state);
+        let top = buffer_text(&draw_overview(160, 12, &state));
+        assert!(top.contains("claude"));
+        state.scroll = 20;
+        let scrolled = draw_overview(160, 12, &state);
         let scrolled_text = buffer_text(&scrolled);
         assert!(buffer_line(&scrolled, 0).contains("aiwatch"));
-        assert!(scrolled_text.contains("GROK") || scrolled_text.contains("CODEX"));
-        assert!(!scrolled_text.contains("CLAUDE") || scrolled_text.contains("CODEX"));
+        assert!(scrolled_text.contains("codex") || scrolled_text.contains("grok"));
+    }
+
+    fn row_has_fg(buffer: &Buffer, y: u16, color: Color) -> bool {
+        (0..buffer.area.width).any(|x| buffer[(x, y)].fg == color)
     }
 }

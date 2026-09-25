@@ -5,7 +5,7 @@ use aiwatch::{
     config::AppConfig,
     demo,
     model::{DashboardSnapshot, Provider},
-    output,
+    output, panel,
     poller::{PollCoordinator, loading_snapshot},
     ui,
 };
@@ -43,10 +43,13 @@ struct Cli {
     /// Provider poll interval in seconds. Minimum: 300.
     #[arg(long)]
     interval: Option<u64>,
-
     /// Disable local SQLite history and sparklines.
     #[arg(long)]
     no_history: bool,
+
+    /// Use the terminal UI instead of the graphical panel.
+    #[arg(long)]
+    tui: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -125,7 +128,7 @@ async fn main() -> Result<()> {
     let (refresh_tx, refresh_rx) = mpsc::channel(1);
     let poll_interval = Duration::from_secs(config.poll_interval_secs);
     let poller = tokio::spawn(coordinator.run(snapshot_tx, refresh_rx, poll_interval));
-    let result = ui::run(snapshot_rx, refresh_tx, poll_interval).await;
+    let result = present(snapshot_rx, refresh_tx, poll_interval, cli.tui).await;
     poller.abort();
     result
 }
@@ -175,5 +178,18 @@ async fn present_demo(snapshot: DashboardSnapshot, cli: &Cli) -> Result<()> {
     }
     let (_snapshot_guard, snapshot_rx) = watch::channel(snapshot);
     let (refresh_tx, _refresh_guard) = mpsc::channel(1);
-    ui::run(snapshot_rx, refresh_tx, poll_interval).await
+    present(snapshot_rx, refresh_tx, poll_interval, cli.tui).await
+}
+
+async fn present(
+    snapshot_rx: watch::Receiver<DashboardSnapshot>,
+    refresh_tx: mpsc::Sender<()>,
+    poll_interval: Duration,
+    tui: bool,
+) -> Result<()> {
+    if tui {
+        ui::run(snapshot_rx, refresh_tx, poll_interval).await
+    } else {
+        panel::serve(snapshot_rx).await
+    }
 }

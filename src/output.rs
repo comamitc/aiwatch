@@ -66,10 +66,11 @@ mod tests {
     }
 
     #[test]
-    fn once_text_renders_compact_dashboard() {
+    fn once_text_renders_account_cards() {
         let text = render_text(&demo::snapshot(), 160, PollDuration::from_secs(60));
-        assert!(text.contains("ACCOUNT"));
-        assert!(text.contains("pace:"));
-        assert!(text.contains("CLAUDE"));
+        assert!(text.contains("claude"));
+        assert!(text.contains("empty in"));
+        assert!(text.contains("oauth"));
+        assert!(!text.contains("ACCOUNT"));
     }
 }

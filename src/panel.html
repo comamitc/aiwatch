@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>aiwatch</title>
+  <style>
+    :root {
+      --bg: #1e2332;
+      --page: #141824;
+      --name: #c5cdd8;
+      --muted: #7a8496;
+      --meta: #8b93a7;
+      --gold: #d4c078;
+      --gold-fill: #c9b15c;
+      --mint: #6fcb9f;
+      --cyan: #4ecdc4;
+      --track: #2a3144;
+      --rule: #3c455c;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; background: var(--page); }
+    body {
+      min-height: 100vh;
+      padding: 28px;
+      display: flex;
+      flex-direction: column;
+      align-items: flex-start;
+      gap: 16px;
+      font-family: Inter, "SF Pro Text", "Segoe UI", system-ui, sans-serif;
+      -webkit-font-smoothing: antialiased;
+    }
+    .card {
+      width: 476px;
+      background: var(--bg);
+      border-radius: 14px;
+      padding: 14px 16px 16px;
+    }
+    .header {
+      display: flex;
+      align-items: center;
+      min-height: 22px;
+      gap: 8px;
+    }
+    .id { display: flex; align-items: center; gap: 8px; }
+    .dot {
+      display: inline-block;
+      width: 9px;
+      height: 9px;
+      border-radius: 50%;
+      background: var(--dot, #e8a07c);
+      flex: none;
+    }
+    .dot.sm { width: 5px; height: 5px; }
+    .name {
+      color: var(--name);
+      font-size: 15px;
+      font-weight: 500;
+      letter-spacing: -0.01em;
+    }
+    .account {
+      color: var(--meta);
+      font-size: 13px;
+      font-weight: 400;
+    }
+    .rule {
+      flex: 1;
+      height: 0;
+      border-top: 1px dotted var(--rule);
+      margin: 0 4px 0 2px;
+    }
+    .auth {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      color: var(--meta);
+      font-size: 13px;
+      font-weight: 400;
+    }
+    .summary {
+      display: flex;
+      align-items: center;
+      margin-top: 16px;
+      min-height: 18px;
+      gap: 8px;
+    }
+    .sum-left {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .sum-pct {
+      color: var(--gold);
+      font-size: 13px;
+      font-weight: 500;
+      font-variant-numeric: tabular-nums;
+    }
+    .sum-label {
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 400;
+    }
+    .sum-bar {
+      position: relative;
+      width: 218px;
+      height: 5px;
+    }
+    .empty {
+      margin-left: auto;
+      color: var(--gold);
+      font-size: 13px;
+      font-weight: 500;
+      font-variant-numeric: tabular-nums;
+    }
+    .meters {
+      margin-top: 18px;
+      display: flex;
+      flex-direction: column;
+      gap: 11px;
+    }
+    .meter {
+      display: grid;
+      grid-template-columns: 64px 218px 46px 1fr;
+      align-items: center;
+      column-gap: 10px;
+      min-height: 16px;
+    }
+    .label {
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 400;
+    }
+    .bar {
+      position: relative;
+      height: 5px;
+    }
+    .meter.session .bar { height: 8px; }
+    .track {
+      position: absolute;
+      left: 0;
+      top: 0;
+      height: 100%;
+      width: 100%;
+      border-radius: 999px;
+      background: var(--track);
+    }
+    .fill {
+      position: absolute;
+      left: 0;
+      top: 0;
+      height: 100%;
+      border-radius: 999px;
+      width: calc(var(--used) * 1%);
+      max-width: 100%;
+    }
+    .meter.session .fill { background: var(--mint); }
+    .meter.allowance .fill,
+    .sum-bar .fill { background: var(--gold-fill); }
+    .tick {
+      position: absolute;
+      top: 50%;
+      left: calc(var(--pace) * 1%);
+      width: 2px;
+      height: 14px;
+      transform: translate(-1px, -50%);
+      border-radius: 1px;
+      background: var(--cyan);
+    }
+    .meter.session .tick { height: 16px; }
+    .sum-bar .tick { height: 14px; }
+    .pct {
+      font-size: 13px;
+      font-weight: 500;
+      font-variant-numeric: tabular-nums;
+    }
+    .meter.session .pct { color: var(--mint); }
+    .meter.allowance .pct { color: var(--gold); }
+    .time {
+      justify-self: end;
+      color: var(--gold);
+      font-size: 13px;
+      font-weight: 400;
+      font-variant-numeric: tabular-nums;
+    }
+    .notice { color: var(--muted); font-size: 13px; margin-top: 12px; }
+  </style>
+</head>
+<body>
+  <div id="cards"></div>
+  <script>
+    const cards = window.__CARDS__ || [];
+    const root = document.getElementById("cards");
+
+    function el(tag, className, text) {
+      const node = document.createElement(tag);
+      if (className) node.className = className;
+      if (text != null) node.textContent = text;
+      return node;
+    }
+
+    function bar(used, pace, summary) {
+      const wrap = el("span", summary ? "sum-bar" : "bar");
+      if (!summary) wrap.append(el("span", "track"));
+      const fill = el("span", "fill");
+      fill.style.width = used + "%";
+      wrap.append(fill);
+      if (pace != null) {
+        const tick = el("span", "tick");
+        tick.style.left = pace + "%";
+        wrap.append(tick);
+      }
+      return wrap;
+    }
+
+    function render(list) {
+      root.replaceChildren();
+      for (const card of list) {
+        const article = el("article", "card");
+        article.style.setProperty("--dot", card.dot);
+
+        const header = el("div", "header");
+        const id = el("div", "id");
+        id.append(el("span", "dot"), el("span", "name", card.title));
+        if (card.account) id.append(el("span", "account", card.account));
+        header.append(id, el("span", "rule"));
+        const auth = el("div", "auth");
+        if (card.plan) auth.append(el("span", null, card.plan));
+        auth.append(el("span", "dot sm"), el("span", null, card.auth));
+        header.append(auth);
+        article.append(header);
+
+        if (card.summary) {
+          const summary = el("div", "summary");
+          const left = el("div", "sum-left");
+          left.append(
+            el("span", "sum-pct", card.summary.percent),
+            el("span", "sum-label", card.summary.label),
+            bar(card.summary.used, card.summary.pace, true)
+          );
+          summary.append(left, el("span", "empty", card.summary.empty));
+          article.append(summary);
+        }
+
+        if (card.meters.length) {
+          const meters = el("div", "meters");
+          for (const meter of card.meters) {
+            const row = el("div", "meter " + meter.tone);
+            row.append(
+              el("span", "label", meter.label),
+              bar(meter.used, meter.pace, false),
+              el("span", "pct", meter.percent),
+              el("span", "time", meter.time)
+            );
+            meters.append(row);
+          }
+          article.append(meters);
+        } else if (card.notice) {
+          article.append(el("div", "notice", card.notice));
+        }
+        root.append(article);
+      }
+    }
+
+    render(cards);
+    if (!cards.length) {
+      async function refresh() {
+        const response = await fetch("/api/snapshot");
+        if (response.ok) render(await response.json());
+      }
+      refresh();
+      setInterval(refresh, 2000);
+    }
+  </script>
+</body>
+</html>
