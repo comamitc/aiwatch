@@ -36,7 +36,7 @@ aiwatch --demo
 ## Usage
 
 ```console
-aiwatch                       # graphical account cards, one per provider account
+aiwatch                       # terminal account cards, one per provider account
 aiwatch --once                # static terminal snapshot
 aiwatch --json                # one machine-readable snapshot
 aiwatch --provider claude     # one provider
@@ -44,7 +44,6 @@ aiwatch --provider claude,codex
 aiwatch --interval 600        # provider polling interval, minimum 300s
 aiwatch --no-history          # disable local SQLite snapshots
 aiwatch --demo --once         # safe static preview
-aiwatch --tui                 # terminal UI instead of the panel
 ```
 
 Interactive keys:

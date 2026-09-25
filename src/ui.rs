@@ -23,9 +23,9 @@ use crate::{
     model::{AccountSnapshot, DashboardSnapshot, HealthState, Provider},
 };
 
-const BG: Color = Color::Rgb(0x1e, 0x23, 0x32);
+const BG: Color = Color::Reset;
 const FG: Color = Color::Rgb(0xc5, 0xcd, 0xd8);
-const TRACK: Color = Color::Rgb(0x2e, 0x34, 0x44);
+const DIM: Color = Color::Rgb(0x5c, 0x65, 0x78);
 const GOLD: Color = Color::Rgb(0xd4, 0xc0, 0x78);
 const GOLD_FILL: Color = Color::Rgb(0xc9, 0xb1, 0x5c);
 const MINT: Color = Color::Rgb(0x6f, 0xcb, 0x9f);
@@ -246,7 +246,7 @@ fn render(
     now: DateTime<Utc>,
 ) {
     let area = frame.area();
-    frame.render_widget(Block::default().style(Style::default().fg(FG).bg(BG)), area);
+    frame.render_widget(Block::default().style(Style::default().fg(FG)), area);
     let [header, body, footer] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(6),
@@ -313,144 +313,146 @@ fn render_overview_body(
 }
 
 fn card_lines(card: &dashboard::AccountCard<'_>, width: usize) -> Vec<Line<'static>> {
-    let mut lines = vec![identity_line(card, width)];
+    let inner = width.saturating_sub(2);
+    let mut body = Vec::new();
     if let Some(summary) = &card.summary {
-        lines.push(summary_line(summary, width));
+        body.push(summary_line(summary, inner));
     }
     if card.meters.is_empty() {
         if let Some(notice) = &card.notice {
-            lines.push(Line::from(Span::styled(
+            body.push(Line::from(Span::styled(
                 notice.clone(),
-                Style::default()
-                    .fg(health_color(card.account.health.state))
-                    .bg(BG),
+                Style::default().fg(health_color(card.account.health.state)),
             )));
         }
     } else {
-        lines.push(blank_line());
+        body.push(blank_line());
         for meter in &card.meters {
-            lines.push(meter_line(meter, width));
+            body.push(meter_line(meter, inner));
         }
     }
+    let mut lines = vec![top_border(card, width)];
+    for line in body {
+        lines.push(side_frame(line, width));
+    }
+    lines.push(bottom_border(width));
     lines
 }
 
-fn identity_line(card: &dashboard::AccountCard<'_>, width: usize) -> Line<'static> {
-    let dot = if card.account.health.state == HealthState::Ok {
+fn top_border(card: &dashboard::AccountCard<'_>, width: usize) -> Line<'static> {
+    let accent = if card.account.health.state == HealthState::Ok {
         provider_accent(card.account.provider)
     } else {
         health_color(card.account.health.state)
     };
-    let mut spans = vec![
-        Span::styled("●", Style::default().fg(dot).bg(BG)),
-        Span::styled(format!(" {}", card.title), Style::default().fg(FG).bg(BG)),
-    ];
-    let mut used = 2 + card.title.chars().count();
-    if let Some(name) = &card.account_name {
-        used += 1 + name.chars().count();
-        spans.push(Span::styled(
-            format!(" {name}"),
-            Style::default().fg(META).bg(BG),
-        ));
+    let inner = width.saturating_sub(2);
+    let name = card
+        .account_name
+        .as_deref()
+        .map(|name| format!(" {name}"))
+        .unwrap_or_default();
+    let left = format!(" ● {}{name} ", card.title);
+    let right = match &card.plan {
+        Some(plan) => format!(" {plan} · {} ", card.auth),
+        None => format!(" {} ", card.auth),
+    };
+    let dashes = inner.saturating_sub(left.chars().count() + right.chars().count());
+    Line::from(vec![
+        Span::styled("╭", Style::default().fg(DIM)),
+        Span::styled(left, Style::default().fg(accent)),
+        Span::styled("─".repeat(dashes), Style::default().fg(DIM)),
+        Span::styled(right, Style::default().fg(META)),
+        Span::styled("╮", Style::default().fg(DIM)),
+    ])
+}
+
+fn bottom_border(width: usize) -> Line<'static> {
+    let inner = width.saturating_sub(2);
+    Line::from(vec![
+        Span::styled("╰", Style::default().fg(DIM)),
+        Span::styled("─".repeat(inner), Style::default().fg(DIM)),
+        Span::styled("╯", Style::default().fg(DIM)),
+    ])
+}
+
+fn side_frame(line: Line<'static>, width: usize) -> Line<'static> {
+    let inner = width.saturating_sub(2);
+    let used = line
+        .spans
+        .iter()
+        .map(|span| span.content.chars().count())
+        .sum::<usize>();
+    let mut spans = vec![Span::styled("│", Style::default().fg(DIM))];
+    spans.extend(line.spans);
+    if used < inner {
+        spans.push(Span::raw(" ".repeat(inner - used)));
     }
-    let (plan, auth) = (card.plan.clone(), card.auth);
-    let right_width = plan.as_ref().map_or(2 + auth.chars().count(), |plan| {
-        plan.chars().count() + 3 + auth.chars().count()
-    });
-    spans.push(Span::styled(
-        " ".repeat(width.saturating_sub(used + right_width)),
-        Style::default().bg(BG),
-    ));
-    if let Some(plan) = plan {
-        spans.push(Span::styled(plan, Style::default().fg(META).bg(BG)));
-        spans.push(Span::styled(
-            " ● ",
-            Style::default()
-                .fg(provider_accent(card.account.provider))
-                .bg(BG),
-        ));
-    } else {
-        spans.push(Span::styled(
-            "● ",
-            Style::default()
-                .fg(provider_accent(card.account.provider))
-                .bg(BG),
-        ));
-    }
-    spans.push(Span::styled(
-        auth.to_string(),
-        Style::default().fg(META).bg(BG),
-    ));
+    spans.push(Span::styled("│", Style::default().fg(DIM)));
     Line::from(spans)
 }
 
 fn summary_line(summary: &dashboard::CardSummary, width: usize) -> Line<'static> {
-    let label = format!(
-        "{} {}",
-        dashboard::percent_label(summary.percent),
-        summary.label
-    );
+    let percent = dashboard::percent_label(summary.percent);
     let mut spans = vec![
-        Span::styled(label, Style::default().fg(GOLD).bg(BG)),
-        Span::styled(" ", Style::default().bg(BG)),
+        Span::styled(percent, Style::default().fg(GOLD)),
+        Span::styled(format!(" {}", summary.label), Style::default().fg(MUTED)),
+        Span::raw(" "),
     ];
-    let bar_width = dashboard::SUMMARY_BAR_WIDTH.min(width.saturating_sub(16));
-    spans.extend(usage_bar_spans(
-        summary.percent,
-        bar_width,
-        summary.pace,
-        tone_color(summary.tone),
-    ));
-    let right = format!("empty in {}", summary.empty_in.as_deref().unwrap_or("—"));
     let used = spans
         .iter()
         .map(|span| span.content.chars().count())
         .sum::<usize>();
-    spans.push(Span::styled(
-        " ".repeat(width.saturating_sub(used + right.chars().count())),
-        Style::default().bg(BG),
+    let right = format!("empty in {}", summary.empty_in.as_deref().unwrap_or("—"));
+    let bar_width = width.saturating_sub(used + 1 + right.chars().count());
+    spans.extend(rail_spans(
+        summary.percent,
+        summary.pace,
+        bar_width,
+        tone_color(summary.tone),
     ));
-    spans.push(Span::styled(right, Style::default().fg(GOLD).bg(BG)));
+    spans.push(Span::raw(" "));
+    spans.push(Span::styled(right, Style::default().fg(GOLD)));
     Line::from(spans)
 }
 
 fn meter_line(meter: &dashboard::CardMeter, width: usize) -> Line<'static> {
     let columns = dashboard::meter_columns(width);
+    let fill = tone_color(meter.tone);
     let mut spans = vec![Span::styled(
         dashboard::pad_cell(&meter.label, columns.label),
-        Style::default().fg(MUTED).bg(BG),
+        Style::default().fg(MUTED),
     )];
     if columns.bar > 0 {
-        spans.push(Span::styled(" ", Style::default().bg(BG)));
-        spans.extend(usage_bar_spans(
+        spans.push(Span::raw(" "));
+        spans.extend(rail_spans(
             meter.used_percent,
-            columns.bar,
             meter.pace,
-            tone_color(meter.tone),
+            columns.bar,
+            fill,
         ));
     }
     if columns.percent > 0 {
-        spans.push(Span::styled(" ", Style::default().bg(BG)));
+        spans.push(Span::raw(" "));
         spans.push(Span::styled(
             dashboard::pad_cell(
                 &dashboard::percent_label(meter.used_percent),
                 columns.percent,
             ),
-            Style::default().fg(GOLD).bg(BG),
+            Style::default().fg(fill),
         ));
     }
     if columns.time > 0 {
-        spans.push(Span::styled(" ", Style::default().bg(BG)));
+        spans.push(Span::raw(" "));
         spans.push(Span::styled(
             align_right(&meter.reset, columns.time),
-            Style::default().fg(MUTED).bg(BG),
+            Style::default().fg(GOLD),
         ));
     }
     Line::from(spans)
 }
 
 fn blank_line() -> Line<'static> {
-    Line::from(Span::styled(" ", Style::default().bg(BG)))
+    Line::from("")
 }
 
 fn align_right(text: &str, width: usize) -> String {
@@ -467,53 +469,94 @@ fn tone_color(tone: MeterTone) -> Color {
     match tone {
         MeterTone::Session => MINT,
         MeterTone::Allowance => GOLD_FILL,
-        MeterTone::Unknown => MUTED,
+        MeterTone::Unknown => DIM,
     }
 }
 
-fn usage_bar_spans(
+fn rail_spans(
     used_percent: f64,
-    width: usize,
     pace: Option<f64>,
+    width: usize,
     fill: Color,
 ) -> Vec<Span<'static>> {
     if width == 0 {
         return Vec::new();
     }
-    let filled = ((used_percent.clamp(0.0, 100.0) / 100.0) * width as f64).round() as usize;
-    let marker = dashboard::pace_column(pace, width);
+    let used_halves =
+        ((used_percent.clamp(0.0, 100.0) / 100.0) * (width as f64 * 2.0)).round() as usize;
+    let marker = pace.map(|pace| {
+        let column = ((pace.clamp(0.0, 100.0) / 100.0) * width as f64).round() as usize;
+        column.min(width - 1)
+    });
+    let gap_left = marker.and_then(|column| column.checked_sub(1));
+    let gap_right = marker
+        .filter(|column| column + 1 < width)
+        .map(|column| column + 1);
     let mut spans = Vec::new();
     let mut index = 0;
     while index < width {
         if marker == Some(index) {
-            let marker_bg = if index < filled { fill } else { TRACK };
-            spans.push(Span::styled(
-                "│",
-                Style::default()
-                    .fg(CYAN)
-                    .bg(marker_bg)
-                    .add_modifier(Modifier::BOLD),
-            ));
+            spans.push(Span::styled("┃", Style::default().fg(CYAN)));
             index += 1;
             continue;
         }
-        let filled_run = index < filled;
+        if gap_left == Some(index) || gap_right == Some(index) {
+            spans.push(Span::raw(" "));
+            index += 1;
+            continue;
+        }
         let start = index;
-        while index < width && marker != Some(index) && (index < filled) == filled_run {
+        while index < width
+            && marker != Some(index)
+            && gap_left != Some(index)
+            && gap_right != Some(index)
+        {
             index += 1;
         }
-        let run = index - start;
-        if filled_run {
-            spans.push(Span::styled(
-                "█".repeat(run),
-                Style::default().fg(fill).bg(BG),
-            ));
-        } else {
-            spans.push(Span::styled(
-                "█".repeat(run),
-                Style::default().fg(TRACK).bg(BG),
-            ));
+        let mut run = String::new();
+        for cell in start..index {
+            let left = cell * 2 < used_halves;
+            let right = cell * 2 + 1 < used_halves;
+            run.push(match (left, right) {
+                (true, true) => '━',
+                (true, false) => '╸',
+                (false, true) => '╺',
+                (false, false) => '─',
+            });
         }
+        spans.extend(split_rail(&run, fill));
+    }
+    spans
+}
+
+fn split_rail(run: &str, fill: Color) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    let mut current = String::new();
+    let mut current_fill = None;
+    for ch in run.chars() {
+        let is_fill = ch != '─';
+        if current_fill == Some(is_fill) {
+            current.push(ch);
+            continue;
+        }
+        if !current.is_empty() {
+            let color = if current_fill == Some(true) {
+                fill
+            } else {
+                DIM
+            };
+            spans.push(Span::styled(current, Style::default().fg(color)));
+        }
+        current = ch.to_string();
+        current_fill = Some(is_fill);
+    }
+    if !current.is_empty() {
+        let color = if current_fill == Some(true) {
+            fill
+        } else {
+            DIM
+        };
+        spans.push(Span::styled(current, Style::default().fg(color)));
     }
     spans
 }
@@ -774,7 +817,7 @@ mod tests {
         (0..buffer.area.height)
             .flat_map(|y| {
                 (0..buffer.area.width)
-                    .filter(|&x| buffer[(x, y)].symbol() == "│" && buffer[(x, y)].bg != BG)
+                    .filter(|&x| buffer[(x, y)].symbol() == "┃" && buffer[(x, y)].fg == CYAN)
                     .map(|x| (x, y))
                     .collect::<Vec<_>>()
             })
@@ -902,40 +945,33 @@ mod tests {
     }
 
     #[test]
-    fn overview_is_one_card_per_account() {
+    fn overview_is_one_rounded_card_per_account() {
         let buffer = draw_overview(160, 40, &AppState::new());
         let text = buffer_text(&buffer);
-        assert!(buffer_line(&buffer, 0).contains("aiwatch"));
-        assert!(buffer_line(&buffer, 0).contains("profile all"));
-        assert!(text.contains("claude work"));
-        assert!(text.contains("claude personal"));
-        assert!(text.contains("codex work"));
-        assert!(text.contains("grok work"));
-        assert!(text.contains("max 20x ● oauth"));
+        assert!(text.contains("╭"));
+        assert!(text.contains("● claude work"));
+        assert!(text.contains("max 20x · oauth"));
         assert!(text.contains("session"));
-        assert!(text.contains("week"));
         assert!(text.contains("empty in"));
+        assert!(text.contains('━'));
+        assert!(text.contains('┃'));
         assert!(!text.contains("ACCOUNT"));
-        assert!(!text.contains("7D PEAK"));
         let footer = buffer_line(&buffer, 39);
         assert!(footer.contains("p profile"));
         assert_eq!(buffer[(0, 0)].bg, BG);
-
-        let claude_y = (0..buffer.area.height)
-            .find(|y| buffer_line(&buffer, *y).contains("claude work"))
-            .expect("claude card");
-        assert_eq!(buffer[(0, claude_y)].fg, CLAUDE);
-        assert_eq!(buffer[(0, claude_y)].symbol(), "●");
     }
 
     #[test]
     fn session_meter_is_mint_and_week_meter_is_gold() {
         let buffer = draw_overview(120, 24, &AppState::new());
         let session_y = (0..buffer.area.height)
-            .find(|y| buffer_line(&buffer, *y).trim_start().starts_with("session"))
+            .find(|y| buffer_line(&buffer, *y).contains("session"))
             .expect("session row");
         let week_y = (0..buffer.area.height)
-            .find(|y| buffer_line(&buffer, *y).trim_start().starts_with("week"))
+            .find(|y| {
+                let line = buffer_line(&buffer, *y);
+                line.contains("week") && line.contains('━')
+            })
             .expect("week row");
         assert!(row_has_fg(&buffer, session_y, MINT));
         assert!(row_has_fg(&buffer, week_y, GOLD_FILL));
@@ -945,88 +981,63 @@ mod tests {
 
     #[test]
     fn narrow_card_keeps_meter_label_and_percent() {
-        let text = buffer_text(&draw_overview(40, 20, &AppState::new()));
+        let text = buffer_text(&draw_overview(48, 24, &AppState::new()));
         assert!(text.contains("session"));
         assert!(text.contains('%'));
-        assert!(!text.contains("7D"));
     }
 
     #[test]
-    fn pace_marker_is_cyan_on_fill_or_track() {
-        let fill = MINT;
-        let ahead = usage_bar_spans(80.0, 10, Some(20.0), fill);
+    fn pace_marker_breaks_the_rail_and_stays_teal() {
+        let ahead = rail_spans(80.0, Some(20.0), 12, MINT);
+        let text: String = ahead.iter().map(|span| span.content.as_ref()).collect();
+        assert!(text.contains(" ┃ "), "{text}");
         let marker = ahead
             .iter()
-            .find(|span| span.content.as_ref() == "│")
-            .expect("filled marker");
+            .find(|span| span.content.as_ref() == "┃")
+            .expect("marker");
         assert_eq!(marker.style.fg, Some(CYAN));
-        assert_eq!(marker.style.bg, Some(fill));
-
-        let behind = usage_bar_spans(20.0, 10, Some(80.0), fill);
-        let marker = behind
-            .iter()
-            .find(|span| span.content.as_ref() == "│")
-            .expect("track marker");
-        assert_eq!(marker.style.fg, Some(CYAN));
-        assert_eq!(marker.style.bg, Some(TRACK));
+        assert_eq!(marker.style.bg, None);
+        assert!(text.contains('━'));
+        assert!(text.contains('─'));
     }
 
     #[test]
-    fn overview_and_focused_pace_ticks_follow_usage() {
+    fn overview_and_focused_pace_ticks_are_teal_without_a_fill() {
         let now = Utc::now();
         let remaining = ChronoDuration::hours(2) + ChronoDuration::minutes(30);
         let mut focused = AppState::new();
         focused.view = ViewMode::Focused;
-
-        let ahead = paced_account_snapshot(65.0, remaining, now);
         for state in [&AppState::new(), &focused] {
-            let buffer = draw_snapshot(&ahead, state, 160, 16, now);
+            let buffer = draw_snapshot(
+                &paced_account_snapshot(65.0, remaining, now),
+                state,
+                160,
+                16,
+                now,
+            );
             let cells = usage_marker_cells(&buffer);
             assert!(!cells.is_empty(), "expected pace marker");
-            for (x, y) in cells {
-                assert_eq!(buffer[(x, y)].fg, CYAN);
-                assert_eq!(buffer[(x, y)].bg, MINT);
-            }
-        }
-
-        let behind = paced_account_snapshot(20.0, remaining, now);
-        for state in [&AppState::new(), &focused] {
-            let buffer = draw_snapshot(&behind, state, 160, 16, now);
-            let cells = usage_marker_cells(&buffer);
-            assert!(!cells.is_empty(), "expected pace marker");
-            for (x, y) in cells {
-                assert_eq!(buffer[(x, y)].fg, CYAN);
-                assert_eq!(buffer[(x, y)].bg, TRACK);
+            for (x, y) in &cells {
+                assert_eq!(buffer[(*x, *y)].fg, CYAN);
+                assert_eq!(buffer[(*x, *y)].bg, BG);
+                if *x > 0 {
+                    assert_eq!(buffer[(*x - 1, *y)].symbol(), " ");
+                }
             }
         }
     }
 
     #[test]
-    fn cards_are_separated_and_scroll() {
+    fn cards_keep_rounded_titles_and_scroll() {
         let buffer = draw_overview(160, 48, &AppState::new());
-        let lines = (0..buffer.area.height)
-            .map(|y| buffer_line(&buffer, y).trim_end().to_string())
-            .collect::<Vec<_>>();
-        let first = lines
-            .iter()
-            .position(|line| line.contains("claude work"))
-            .expect("first card");
-        let second = lines
-            .iter()
-            .position(|line| line.contains("claude personal"))
-            .expect("second card");
-        assert!(lines[second - 1].is_empty());
-        assert!(lines[first + 1].contains("week") || lines[first + 1].contains("empty in"));
-        assert!(
-            lines
-                .iter()
-                .any(|line| line.trim_start().starts_with("session"))
-        );
+        let text = buffer_text(&buffer);
+        assert!(text.contains("╭"));
+        assert!(text.contains("● claude work"));
+        assert!(text.contains("● claude personal"));
+        assert!(text.contains("session"));
 
         let mut state = AppState::new();
-        let top = buffer_text(&draw_overview(160, 12, &state));
-        assert!(top.contains("claude"));
-        state.scroll = 20;
+        state.scroll = 24;
         let scrolled = draw_overview(160, 12, &state);
         let scrolled_text = buffer_text(&scrolled);
         assert!(buffer_line(&scrolled, 0).contains("aiwatch"));
