@@ -43,7 +43,6 @@ struct Cli {
     /// Provider poll interval in seconds. Minimum: 300.
     #[arg(long)]
     interval: Option<u64>,
-
     /// Disable local SQLite history and sparklines.
     #[arg(long)]
     no_history: bool,

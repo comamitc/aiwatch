@@ -1,6 +1,6 @@
 use std::{collections::BTreeSet, time::Duration as PollDuration};
 
-use chrono::{DateTime, Local, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, Local, Utc};
 
 use crate::model::{
     AccountSnapshot, DashboardSnapshot, HealthState, Provider, UsageWindow, WindowClass,
@@ -261,6 +261,13 @@ pub fn compact_countdown(reset: DateTime<Utc>, now: DateTime<Utc>) -> String {
     if remaining.num_seconds() <= 0 {
         return "due".to_string();
     }
+    format_duration(remaining)
+}
+
+pub fn format_duration(remaining: ChronoDuration) -> String {
+    if remaining.num_seconds() <= 0 {
+        return "now".to_string();
+    }
     if remaining.num_days() > 0 {
         format!("{}d {}h", remaining.num_days(), remaining.num_hours() % 24)
     } else if remaining.num_hours() > 0 {
@@ -272,6 +279,349 @@ pub fn compact_countdown(reset: DateTime<Utc>, now: DateTime<Utc>) -> String {
     } else {
         format!("{}m", remaining.num_minutes().max(1))
     }
+}
+
+/// Time until this window hits 100% at its current burn, if that happens before reset.
+pub fn empties_in(window: &UsageWindow, now: DateTime<Utc>) -> Option<ChronoDuration> {
+    if window.used_percent >= 100.0 {
+        return Some(ChronoDuration::zero());
+    }
+    let reset = window.resets_at?;
+    let duration = window.class().duration()?;
+    let remaining = reset - now;
+    if remaining <= ChronoDuration::zero() || remaining > duration {
+        return None;
+    }
+    let elapsed = duration - remaining;
+    if elapsed < ChronoDuration::minutes(1) || window.used_percent <= 0.0 {
+        return None;
+    }
+    let rate = window.used_percent / elapsed.num_milliseconds() as f64;
+    if rate <= 0.0 {
+        return None;
+    }
+    let projected = ChronoDuration::milliseconds(
+        ((100.0 - window.used_percent) / rate).round().max(0.0) as i64,
+    );
+    if projected > remaining {
+        return None;
+    }
+    Some(projected)
+}
+
+pub fn soonest_empty<'a>(
+    windows: impl IntoIterator<Item = &'a UsageWindow>,
+    now: DateTime<Utc>,
+) -> Option<ChronoDuration> {
+    windows
+        .into_iter()
+        .filter_map(|window| empties_in(window, now))
+        .min()
+}
+
+pub fn percent_label(used: f64) -> String {
+    format!("{:.0}%", used.clamp(0.0, 100.0).round())
+}
+
+pub fn meter_label(window: &UsageWindow) -> String {
+    match window.class() {
+        WindowClass::FiveHour => "session".to_string(),
+        WindowClass::Monthly => "month".to_string(),
+        WindowClass::SevenDay => scoped_week_label(&window.label),
+        WindowClass::Unknown => {
+            let label = window.label.trim().to_ascii_lowercase();
+            if label.is_empty() {
+                "usage".to_string()
+            } else {
+                label
+            }
+        }
+    }
+}
+
+fn scoped_week_label(label: &str) -> String {
+    let token = label
+        .split_whitespace()
+        .next()
+        .unwrap_or("week")
+        .trim_matches(|character: char| !character.is_ascii_alphanumeric())
+        .to_ascii_lowercase();
+    if token.is_empty() || token == "weekly" || token == "week" || token == "7d" {
+        "week".to_string()
+    } else {
+        token
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MeterTone {
+    Session,
+    Allowance,
+    Unknown,
+}
+
+pub fn meter_tone(window: &UsageWindow) -> MeterTone {
+    match window.class() {
+        WindowClass::FiveHour => MeterTone::Session,
+        WindowClass::SevenDay | WindowClass::Monthly => MeterTone::Allowance,
+        WindowClass::Unknown => MeterTone::Unknown,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MeterColumns {
+    pub label: usize,
+    pub bar: usize,
+    pub percent: usize,
+    pub time: usize,
+}
+
+pub fn meter_columns(width: usize) -> MeterColumns {
+    if width >= 36 {
+        MeterColumns {
+            label: 8,
+            bar: width - 22,
+            percent: 4,
+            time: 7,
+        }
+    } else if width >= 20 {
+        MeterColumns {
+            label: 8,
+            bar: width.saturating_sub(14),
+            percent: 4,
+            time: 0,
+        }
+    } else {
+        MeterColumns {
+            label: width.min(8),
+            bar: 0,
+            percent: 0,
+            time: 0,
+        }
+    }
+}
+
+pub const SUMMARY_BAR_WIDTH: usize = 10;
+
+#[derive(Debug, Clone)]
+pub struct CardSummary {
+    pub percent: f64,
+    pub label: String,
+    pub pace: Option<f64>,
+    pub empty_in: Option<String>,
+    pub tone: MeterTone,
+}
+
+#[derive(Debug, Clone)]
+pub struct CardMeter {
+    pub label: String,
+    pub used_percent: f64,
+    pub pace: Option<f64>,
+    pub reset: String,
+    pub tone: MeterTone,
+}
+
+#[derive(Debug, Clone)]
+pub struct AccountCard<'a> {
+    pub account: &'a AccountSnapshot,
+    pub title: String,
+    pub account_name: Option<String>,
+    pub plan: Option<String>,
+    pub auth: &'static str,
+    pub summary: Option<CardSummary>,
+    pub meters: Vec<CardMeter>,
+    pub notice: Option<String>,
+}
+
+pub fn card_auth_label(account: &AccountSnapshot) -> &'static str {
+    match account.health.state {
+        HealthState::Ok | HealthState::Stale => "oauth",
+        HealthState::AuthenticationRequired => "login",
+        HealthState::RateLimited => "limited",
+        HealthState::Error => "error",
+    }
+}
+
+pub fn card_account_name(account: &AccountSnapshot) -> Option<String> {
+    let name = account.name.trim();
+    if name.is_empty()
+        || name.eq_ignore_ascii_case("default")
+        || name.eq_ignore_ascii_case(account.provider.key())
+    {
+        None
+    } else {
+        Some(name.to_string())
+    }
+}
+
+pub fn account_cards<'a>(
+    snapshot: &'a DashboardSnapshot,
+    provider: Option<Provider>,
+    profile: ProfileFilter,
+    weekly_only: bool,
+    now: DateTime<Utc>,
+) -> Vec<AccountCard<'a>> {
+    visible_accounts(snapshot, provider, profile)
+        .into_iter()
+        .map(|account| account_card(account, weekly_only, now))
+        .collect()
+}
+
+pub fn account_card<'a>(
+    account: &'a AccountSnapshot,
+    weekly_only: bool,
+    now: DateTime<Utc>,
+) -> AccountCard<'a> {
+    let visible: Vec<&UsageWindow> = account
+        .windows
+        .iter()
+        .filter(|window| window_is_weekly_view(window, weekly_only))
+        .collect();
+    let summary_window = visible
+        .iter()
+        .copied()
+        .find(|window| meter_label(window) == "week")
+        .or_else(|| {
+            visible
+                .iter()
+                .copied()
+                .find(|window| window.class() == WindowClass::SevenDay)
+        })
+        .or_else(|| visible.first().copied());
+    let empty_in = soonest_empty(visible.iter().copied(), now).map(format_duration);
+    let summary = summary_window.map(|window| CardSummary {
+        percent: window.used_percent,
+        label: meter_label(window),
+        pace: window.pace_used_percent(now),
+        empty_in,
+        tone: meter_tone(window),
+    });
+    let meters = visible
+        .iter()
+        .copied()
+        .map(|window| CardMeter {
+            label: meter_label(window),
+            used_percent: window.used_percent,
+            pace: window.pace_used_percent(now),
+            reset: reset_cell(window.resets_at, now),
+            tone: meter_tone(window),
+        })
+        .collect::<Vec<_>>();
+    let notice = if meters.is_empty() {
+        Some(account.health.message.clone().unwrap_or_else(|| {
+            if weekly_only {
+                "No weekly usage window reported".to_string()
+            } else {
+                "Quota unavailable".to_string()
+            }
+        }))
+    } else {
+        None
+    };
+    AccountCard {
+        account,
+        title: account.provider.key().to_string(),
+        account_name: card_account_name(account),
+        plan: account
+            .plan
+            .as_deref()
+            .map(|plan| plan.trim().to_ascii_lowercase())
+            .filter(|plan| !plan.is_empty()),
+        auth: card_auth_label(account),
+        summary,
+        meters,
+        notice,
+    }
+}
+
+pub fn status_line(account_count: usize, profile: ProfileFilter, poll: PollDuration) -> String {
+    format!(
+        "aiwatch {}  ·  {account_count} accounts  ·  profile {}  ·  poll {}s",
+        env!("CARGO_PKG_VERSION"),
+        profile.label(),
+        poll.as_secs()
+    )
+}
+
+pub fn render_card_text(card: &AccountCard<'_>, width: usize) -> String {
+    let mut lines = vec![identity_line(card, width)];
+    if let Some(summary) = &card.summary {
+        lines.push(summary_line(summary, width));
+    }
+    if card.meters.is_empty() {
+        if let Some(notice) = &card.notice {
+            lines.push(pad_cell(notice, width));
+        }
+    } else {
+        lines.push(String::new());
+        for meter in &card.meters {
+            lines.push(meter_line(meter, width));
+        }
+    }
+    lines.join("\n")
+}
+
+fn identity_line(card: &AccountCard<'_>, width: usize) -> String {
+    let mut left = format!("● {}", card.title);
+    if let Some(name) = &card.account_name {
+        left.push(' ');
+        left.push_str(name);
+    }
+    let right = match &card.plan {
+        Some(plan) => format!("{plan} ● {}", card.auth),
+        None => format!("● {}", card.auth),
+    };
+    align_edges(&left, &right, width)
+}
+
+fn summary_line(summary: &CardSummary, width: usize) -> String {
+    let bar = usage_bar(summary.percent, SUMMARY_BAR_WIDTH.min(width), summary.pace);
+    let left = format!("{} {} {bar}", percent_label(summary.percent), summary.label);
+    let empty = summary.empty_in.as_deref().unwrap_or("—");
+    align_edges(&left, &format!("empty in {empty}"), width)
+}
+
+fn meter_line(meter: &CardMeter, width: usize) -> String {
+    let columns = meter_columns(width);
+    let mut line = pad_cell(&meter.label, columns.label);
+    if columns.bar > 0 {
+        line.push(' ');
+        line.push_str(&usage_bar(meter.used_percent, columns.bar, meter.pace));
+    }
+    if columns.percent > 0 {
+        line.push(' ');
+        line.push_str(&pad_cell(
+            &percent_label(meter.used_percent),
+            columns.percent,
+        ));
+    }
+    if columns.time > 0 {
+        line.push(' ');
+        line.push_str(&align_right(&meter.reset, columns.time));
+    }
+    pad_cell(&line, width)
+}
+
+fn align_edges(left: &str, right: &str, width: usize) -> String {
+    let left_width = left.chars().count();
+    let right_width = right.chars().count();
+    if left_width + 1 + right_width >= width {
+        return pad_cell(&format!("{left} {right}"), width);
+    }
+    let mut line = left.to_string();
+    line.push_str(&" ".repeat(width - left_width - right_width));
+    line.push_str(right);
+    line
+}
+
+fn align_right(text: &str, width: usize) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() >= width {
+        return chars.into_iter().take(width).collect();
+    }
+    let mut line = " ".repeat(width - chars.len());
+    line.extend(chars);
+    line
 }
 
 pub fn age_text(age: chrono::Duration) -> String {
@@ -346,10 +696,20 @@ pub fn render_text(
     poll: PollDuration,
     now: DateTime<Utc>,
 ) -> String {
-    render_overview_text(
-        &build_overview(snapshot, width, poll, None, ProfileFilter::All, false, now),
-        width,
-    )
+    let cards = account_cards(snapshot, None, ProfileFilter::All, false, now);
+    let mut output = fit_line(&status_line(cards.len(), ProfileFilter::All, poll), width);
+    output.push('\n');
+    if cards.is_empty() {
+        output.push_str(&fit_line("No matching accounts.", width));
+        output.push('\n');
+        return output;
+    }
+    for card in &cards {
+        output.push('\n');
+        output.push_str(&render_card_text(card, width));
+        output.push('\n');
+    }
+    output
 }
 
 pub fn render_overview_text(model: &OverviewModel<'_>, width: usize) -> String {
@@ -643,10 +1003,7 @@ fn fit_line(text: &str, width: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        demo,
-        model::{DetailMetric, FetchHealth},
-    };
+    use crate::{demo, model::FetchHealth};
     use chrono::Duration;
 
     fn fixed_now() -> DateTime<Utc> {
@@ -752,126 +1109,100 @@ mod tests {
     }
 
     #[test]
-    fn compact_text_has_header_columns_providers_rows_and_legend() {
+    fn text_renders_one_card_per_account() {
         let snapshot = demo::snapshot();
         let now = snapshot.generated_at;
         let text = render_text(&snapshot, 160, PollDuration::from_secs(60), now);
-        let first = text.lines().next().expect("line 1");
-        let second = text.lines().nth(1).expect("line 2");
+        let first = text.lines().next().expect("status");
         assert!(first.contains("aiwatch"));
         assert!(first.contains(env!("CARGO_PKG_VERSION")));
-        assert!(first.contains("accounts"));
-        assert!(first.contains("providers"));
         assert!(first.contains("profile all"));
-        assert!(second.contains("poll 60s"));
-        assert!(second.contains("nearest cap"));
-        assert!(second.contains("freshness"));
-        assert!(second.contains("health"));
-        assert!(text.contains("ACCOUNT"));
-        assert!(text.contains("WINDOW"));
-        assert!(text.contains("USAGE"));
-        assert!(text.contains("% USED / CAP"));
-        assert!(text.contains("RESETS"));
-        assert!(text.contains("7D"));
-        assert!(text.contains("CLAUDE"));
-        assert!(text.contains("CODEX"));
-        assert!(text.contains("GROK"));
-        assert!(text.contains("peak"));
-        assert!(text.contains("headroom"));
-        assert!(text.contains(PACE_LEGEND));
-        assert!(PACE_LEGEND.contains("on-pace marker"));
-        assert!(PACE_LEGEND.chars().count() <= TARGET_WIDTH);
-        assert!(!PACE_LEGEND.contains("50/80/100"));
+        assert!(first.contains("poll 60s"));
+        assert!(text.contains("● claude work"));
+        assert!(text.contains("max 20x ● oauth"));
+        assert!(text.contains("● codex personal"));
+        assert!(text.contains("● grok work"));
+        assert!(text.contains("session"));
+        assert!(text.contains("week"));
+        assert!(text.contains("empty in"));
+        assert!(text.contains('│'));
+        assert!(!text.contains("ACCOUNT"));
         assert!(!text.contains("7D PEAK"));
-        assert!(!text.contains("local daily peaks"));
-        assert!(!text.to_ascii_lowercase().contains("recommend"));
-        assert!(!text.to_ascii_lowercase().contains("switch account"));
-        assert!(text.contains("% / —"));
-        assert!(!text.contains("burn"));
-        assert!(!text.contains("24h spend"));
+        assert!(!text.contains("recommend"));
         assert!(!text.contains("tokens /"));
-        assert!(!text.contains("messages /"));
     }
 
     #[test]
-    fn one_compact_row_per_window_and_missing_history_is_em_dash() {
+    fn card_uses_session_week_and_model_labels() {
         let mut snapshot = DashboardSnapshot::empty();
         let mut account =
             AccountSnapshot::empty("claude:work", "work", Provider::Claude, FetchHealth::ok());
-        account.plan = Some("pro".into());
+        account.plan = Some("Pro".into());
         account.windows = vec![
             paced_window("five_hour", "5H", 10.0, Duration::hours(4)),
             paced_window("weekly", "WEEKLY", 20.0, Duration::days(6)),
+            UsageWindow::new("weekly_fable", "Fable WEEKLY", 27.0, None),
         ];
         snapshot.accounts.push(account);
-        let text = render_text(&snapshot, 160, PollDuration::from_secs(300), fixed_now());
-        let window_rows = text
-            .lines()
-            .filter(|line| line.contains("5H") || line.contains("WEEKLY"))
-            .count();
-        assert_eq!(window_rows, 2);
-        assert!(text.contains("└─"));
-        assert!(text.contains("—"));
+        let text = render_text(&snapshot, 80, PollDuration::from_secs(300), fixed_now());
+        assert!(text.contains("pro ● oauth"));
+        assert_eq!(
+            text.lines()
+                .filter(|line| line.starts_with("session")
+                    || line.starts_with("week")
+                    || line.starts_with("fable"))
+                .count(),
+            3
+        );
+        assert!(text.contains("10%"));
+        assert!(text.contains("20%"));
+        assert!(text.contains("27%"));
     }
 
     #[test]
-    fn narrow_layout_drops_spark_then_cap_then_shortens_usage() {
-        let full = ColumnLayout::for_width(160);
-        assert!(full.show_spark);
-        assert!(full.show_cap);
-        assert_eq!(full.account, ACCOUNT_WIDTH);
-        assert_eq!(full.window, WINDOW_WIDTH);
-        assert_eq!(full.usage, USAGE_WIDTH);
-        assert_eq!(full.used_cap, USED_CAP_WIDTH);
-        assert_eq!(full.resets, RESETS_WIDTH);
-        assert_eq!(full.spark, SPARK_WIDTH);
-        assert!(full.occupied_width() <= TARGET_WIDTH);
-
-        let no_spark = ColumnLayout::for_width(140);
-        assert!(!no_spark.show_spark);
-        assert!(no_spark.show_cap);
-
-        let no_cap = ColumnLayout::for_width(110);
-        assert!(!no_cap.show_spark);
-        assert!(!no_cap.show_cap);
-        assert_eq!(no_cap.used_cap_header(), "% USED");
-
-        let short_bar = ColumnLayout::for_width(90);
-        assert!(short_bar.usage < USAGE_WIDTH);
-        assert_eq!(short_bar.account, ACCOUNT_WIDTH);
-        assert_eq!(short_bar.window, WINDOW_WIDTH);
-        assert_eq!(short_bar.resets, RESETS_WIDTH);
-    }
-
-    #[test]
-    fn nearest_cap_uses_soonest_future_reset_not_highest_usage() {
+    fn empty_in_is_burn_before_reset_not_the_reset_itself() {
         let now = fixed_now();
-        let mut high =
-            AccountSnapshot::empty("claude:one", "one", Provider::Claude, FetchHealth::ok());
-        high.windows.push(UsageWindow::new(
-            "weekly",
-            "WEEKLY",
-            91.0,
-            Some(now + Duration::hours(10)),
+        let mut fast =
+            AccountSnapshot::empty("claude:work", "work", Provider::Claude, FetchHealth::ok());
+        fast.windows.push(UsageWindow::new(
+            "five_hour",
+            "5H",
+            80.0,
+            Some(now + Duration::hours(1)),
         ));
-        let mut soon =
-            AccountSnapshot::empty("codex:two", "two", Provider::Codex, FetchHealth::ok());
-        soon.windows.push(UsageWindow::new(
+        let mut slow =
+            AccountSnapshot::empty("codex:work", "work", Provider::Codex, FetchHealth::ok());
+        slow.windows.push(UsageWindow::new(
             "five_hour",
             "5H",
             10.0,
             Some(now + Duration::hours(1)),
         ));
-        let snapshot = DashboardSnapshot {
-            generated_at: now,
-            accounts: vec![high, soon],
-        };
-        let text = render_text(&snapshot, 160, PollDuration::from_secs(300), now);
-        assert!(text.contains("nearest cap 1h 0m"));
+        let fast_text = render_text(
+            &DashboardSnapshot {
+                generated_at: now,
+                accounts: vec![fast],
+            },
+            80,
+            PollDuration::from_secs(300),
+            now,
+        );
+        assert!(fast_text.contains("empty in 1h 0m"), "{fast_text}");
+        let slow_text = render_text(
+            &DashboardSnapshot {
+                generated_at: now,
+                accounts: vec![slow],
+            },
+            80,
+            PollDuration::from_secs(300),
+            now,
+        );
+        assert!(slow_text.contains("empty in —"), "{slow_text}");
+        assert!(!slow_text.contains("nearest cap"));
     }
 
     #[test]
-    fn provider_header_omits_monthly_from_peak_and_does_not_average() {
+    fn scoped_week_is_not_labeled_week_and_monthly_stays_month() {
         let mut claude =
             AccountSnapshot::empty("claude:work", "work", Provider::Claude, FetchHealth::ok());
         claude.windows = vec![
@@ -879,49 +1210,19 @@ mod tests {
             UsageWindow::new("weekly_sonnet", "SONNET WEEKLY", 80.0, None),
             UsageWindow::new("monthly", "MONTHLY", 99.0, None),
         ];
-        claude
-            .details
-            .push(DetailMetric::provider("balance", "$25.00"));
-        let mut grok =
-            AccountSnapshot::empty("grok:work", "work", Provider::Grok, FetchHealth::ok());
-        grok.windows
-            .push(UsageWindow::new("monthly", "MONTHLY", 12.0, None));
-        let snapshot = DashboardSnapshot {
-            generated_at: fixed_now(),
-            accounts: vec![claude, grok],
-        };
-        let text = render_text(&snapshot, 160, PollDuration::from_secs(300), fixed_now());
-        assert!(text.contains("peak 80.0%"));
-        assert!(text.contains("headroom 20.0%"));
-        assert!(!text.contains("peak 73."));
-        assert!(text.contains("GROK"));
-        let grok_line = text
-            .lines()
-            .find(|line| line.contains("GROK"))
-            .expect("grok header");
-        assert!(grok_line.contains("peak —"));
-        assert!(grok_line.contains("headroom —"));
-        assert!(text.contains("balance $25.00"));
-    }
-
-    #[test]
-    fn column_header_drops_7d_then_cap_in_text() {
-        let snapshot = demo::snapshot();
-        let now = snapshot.generated_at;
-        let wide = render_text(&snapshot, 160, PollDuration::from_secs(60), now);
-        assert!(wide.contains("% USED / CAP"));
-        let header_160 = wide.lines().nth(2).expect("columns");
-        assert!(header_160.contains("7D"));
-
-        let mid = render_text(&snapshot, 140, PollDuration::from_secs(60), now);
-        let header_140 = mid.lines().nth(2).expect("columns");
-        assert!(!header_140.contains("7D"));
-        assert!(header_140.contains("% USED / CAP"));
-
-        let narrow = render_text(&snapshot, 110, PollDuration::from_secs(60), now);
-        let header_110 = narrow.lines().nth(2).expect("columns");
-        assert!(header_110.contains("% USED"));
-        assert!(!header_110.contains("CAP"));
-        assert!(!header_110.contains("7D"));
+        let text = render_text(
+            &DashboardSnapshot {
+                generated_at: fixed_now(),
+                accounts: vec![claude],
+            },
+            80,
+            PollDuration::from_secs(300),
+            fixed_now(),
+        );
+        assert!(text.contains("40% week"));
+        assert!(text.lines().any(|line| line.starts_with("sonnet")));
+        assert!(text.lines().any(|line| line.starts_with("month")));
+        assert!(!text.contains("73%"));
+        assert!(!text.contains("peak"));
     }
 }
