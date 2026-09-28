@@ -60,9 +60,21 @@ enum Commands {
 #[derive(Debug, Subcommand)]
 enum AccountCommand {
     /// Create an isolated account and run the provider login flow.
-    Add { provider: Provider, name: String },
+    Add {
+        provider: Provider,
+        name: String,
+        /// Sign in with a device code instead of a localhost callback (Codex and Grok; for SSH).
+        #[arg(long)]
+        device_auth: bool,
+    },
     /// Re-run login for an existing isolated account.
-    Login { provider: Provider, name: String },
+    Login {
+        provider: Provider,
+        name: String,
+        /// Sign in with a device code instead of a localhost callback (Codex and Grok; for SSH).
+        #[arg(long)]
+        device_auth: bool,
+    },
     /// Launch the provider CLI inside an isolated account.
     Run {
         provider: Provider,
@@ -132,12 +144,20 @@ async fn main() -> Result<()> {
 fn run_account_command(command: &AccountCommand) -> Result<()> {
     let manager = AccountManager::new()?;
     match command {
-        AccountCommand::Add { provider, name } => {
-            manager.add(*provider, name)?;
+        AccountCommand::Add {
+            provider,
+            name,
+            device_auth,
+        } => {
+            manager.add(*provider, name, *device_auth)?;
             println!("Added {provider} account '{name}'.");
         }
-        AccountCommand::Login { provider, name } => {
-            manager.login(*provider, name)?;
+        AccountCommand::Login {
+            provider,
+            name,
+            device_auth,
+        } => {
+            manager.login(*provider, name, *device_auth)?;
             println!("Authenticated {provider} account '{name}'.");
         }
         AccountCommand::Run {

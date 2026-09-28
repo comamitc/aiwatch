@@ -2,7 +2,7 @@ mod claude;
 mod codex;
 mod grok;
 
-use std::{path::Path, process::Command};
+use std::{io::Write, path::Path, process::Command};
 
 use chrono::{DateTime, Utc};
 use reqwest::{Client, StatusCode};
@@ -94,6 +94,44 @@ pub fn read_secret_file(path: &Path) -> Result<Zeroizing<String>, ProviderError>
     std::fs::read_to_string(path)
         .map(Zeroizing::new)
         .map_err(|_| ProviderError::Credentials(format!("could not read {}", path.display())))
+}
+
+/// Atomically replaces a credential file with owner-only permissions, so a crash or a concurrent
+/// reader never sees a partially written token.
+pub fn write_secret_file(path: &Path, body: &[u8]) -> Result<(), ProviderError> {
+    let failure =
+        |action: &str| ProviderError::Credentials(format!("could not {action} {}", path.display()));
+    let parent = path
+        .parent()
+        .ok_or_else(|| failure("find the directory of"))?;
+    let mut temporary =
+        tempfile::NamedTempFile::new_in(parent).map_err(|_| failure("stage a replacement for"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        temporary
+            .as_file()
+            .set_permissions(std::fs::Permissions::from_mode(0o600))
+            .map_err(|_| failure("protect the replacement for"))?;
+    }
+    temporary
+        .write_all(body)
+        .map_err(|_| failure("write the replacement for"))?;
+    temporary
+        .as_file()
+        .sync_all()
+        .map_err(|_| failure("sync the replacement for"))?;
+    temporary.persist(path).map_err(|_| failure("replace"))?;
+    Ok(())
+}
+
+/// Managed profiles belong to aiwatch, so it may rotate their tokens. Credentials maintained by an
+/// official CLI (`~/.claude`, `~/.codex`) are left for that CLI to refresh, so the two never race.
+pub fn is_managed(account: &AccountConfig) -> bool {
+    matches!(
+        account.credential_source,
+        CredentialSource::ManagedProfile { .. }
+    )
 }
 
 pub fn credential_file(account: &AccountConfig) -> &Path {

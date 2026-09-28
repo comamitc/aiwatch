@@ -1,9 +1,8 @@
-use std::{collections::BTreeMap, io::Write, sync::LazyLock};
+use std::{collections::BTreeMap, sync::LazyLock};
 
 use chrono::{DateTime, Duration, SecondsFormat, Utc};
 use reqwest::{Client, Response, StatusCode};
 use serde::Deserialize;
-use tempfile::NamedTempFile;
 use zeroize::Zeroizing;
 
 use crate::{
@@ -13,7 +12,7 @@ use crate::{
 
 use super::{
     ProviderError, classify_status, credential_file, detect_cli_version, login_hint, parse_rfc3339,
-    read_secret_file,
+    read_secret_file, write_secret_file,
 };
 
 const BILLING_URL: &str = "https://cli-chat-proxy.grok.com/v1/billing?format=credits";
@@ -310,37 +309,10 @@ fn persist_refreshed_auth(
     }
     apply_refreshed_tokens(entry, refreshed, Utc::now());
 
-    let parent = path.parent().ok_or_else(|| {
-        ProviderError::Credentials("Grok credential path has no parent directory".into())
-    })?;
     let encoded = Zeroizing::new(serde_json::to_vec_pretty(&entries).map_err(|_| {
         ProviderError::Credentials("could not encode refreshed Grok credentials".into())
     })?);
-    let mut temporary = NamedTempFile::new_in(parent).map_err(|_| {
-        ProviderError::Credentials("could not create temporary Grok credential file".into())
-    })?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        temporary
-            .as_file()
-            .set_permissions(std::fs::Permissions::from_mode(0o600))
-            .map_err(|_| {
-                ProviderError::Credentials(
-                    "could not protect temporary Grok credential file".into(),
-                )
-            })?;
-    }
-    temporary.write_all(encoded.as_slice()).map_err(|_| {
-        ProviderError::Credentials("could not write refreshed Grok credentials".into())
-    })?;
-    temporary.as_file().sync_all().map_err(|_| {
-        ProviderError::Credentials("could not sync refreshed Grok credentials".into())
-    })?;
-    temporary.persist(path).map_err(|_| {
-        ProviderError::Credentials("could not replace refreshed Grok credentials".into())
-    })?;
-    Ok(())
+    write_secret_file(path, &encoded)
 }
 
 fn apply_refreshed_tokens(

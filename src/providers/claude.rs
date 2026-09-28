@@ -10,9 +10,9 @@ use std::{
     process::{Command, Stdio},
 };
 
-use chrono::Utc;
-use reqwest::{Client, RequestBuilder, StatusCode};
-use serde::Deserialize;
+use chrono::{DateTime, Duration, Utc};
+use reqwest::{Client, RequestBuilder, Response, StatusCode};
+use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
 #[cfg(target_os = "macos")]
@@ -23,11 +23,17 @@ use crate::{
 };
 
 use super::{
-    ProviderError, classify_status, detect_cli_version, login_hint, parse_rfc3339, read_secret_file,
+    ProviderError, classify_status, credential_file, detect_cli_version, is_managed, login_hint,
+    parse_rfc3339, read_secret_file, write_secret_file,
 };
 
 const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
 const PROFILE_URL: &str = "https://api.anthropic.com/api/oauth/profile";
+/// The official Claude Code OAuth client and token endpoint, as used by its own refresh.
+const TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";
+const CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
+/// Claude access tokens last hours, so refresh shortly before they lapse rather than after.
+const REFRESH_EARLY_SECONDS: i64 = 5 * 60;
 const FALLBACK_VERSION: &str = "2.1.201";
 #[cfg(target_os = "macos")]
 const SECURITY_COMMAND: &str = "/usr/bin/security";
@@ -54,6 +60,12 @@ struct Credentials {
 struct OAuth {
     #[serde(rename = "accessToken")]
     access_token: Option<String>,
+    #[serde(default, rename = "refreshToken")]
+    refresh_token: Option<String>,
+    #[serde(default, rename = "expiresAt")]
+    expires_at: Option<i64>,
+    #[serde(default)]
+    scopes: Vec<String>,
     #[serde(rename = "rateLimitTier")]
     rate_limit_tier: Option<String>,
     #[serde(rename = "subscriptionType")]
@@ -63,6 +75,38 @@ struct OAuth {
 struct Auth {
     token: Zeroizing<String>,
     plan: Option<String>,
+    refresh_token: Option<Zeroizing<String>>,
+    expires_at: Option<DateTime<Utc>>,
+    scopes: Vec<String>,
+    /// Whether aiwatch owns this credential file and may rotate its tokens.
+    refreshable: bool,
+}
+
+impl Auth {
+    fn needs_refresh(&self, now: DateTime<Utc>) -> bool {
+        self.expires_at
+            .is_some_and(|expiry| expiry <= now + Duration::seconds(REFRESH_EARLY_SECONDS))
+    }
+}
+
+#[derive(Serialize)]
+struct RefreshRequest<'a> {
+    grant_type: &'static str,
+    refresh_token: &'a str,
+    client_id: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scope: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct RefreshResponse {
+    access_token: String,
+    #[serde(default)]
+    refresh_token: Option<String>,
+    #[serde(default)]
+    expires_in: Option<i64>,
+    #[serde(default)]
+    scope: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -155,15 +199,17 @@ pub async fn fetch(
     client: &Client,
     account: &AccountConfig,
 ) -> Result<AccountSnapshot, ProviderError> {
-    let auth = read_auth(account)?;
-    let response = oauth_get(client, USAGE_URL, auth.token.as_str())
-        .send()
-        .await
-        .map_err(|_| ProviderError::Network)?;
-    if matches!(
-        response.status(),
-        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
-    ) {
+    let mut auth = read_auth(account)?;
+    if auth.needs_refresh(Utc::now()) && refresh_managed_auth(client, account, &auth).await? {
+        auth = reload_auth(account)?;
+    }
+
+    let mut response = send_usage_request(client, &auth).await?;
+    if is_rejected(&response) && refresh_managed_auth(client, account, &auth).await? {
+        auth = reload_auth(account)?;
+        response = send_usage_request(client, &auth).await?;
+    }
+    if is_rejected(&response) {
         invalidate_managed_auth(account);
     }
     classify_status(response.status(), login_hint(account, "claude auth login"))?;
@@ -171,6 +217,122 @@ pub async fn fetch(
     let mut snapshot = map_usage(account, auth.plan.as_deref(), &body)?;
     snapshot.email = profile_email(client, account, auth.token.as_str()).await;
     Ok(snapshot)
+}
+
+async fn send_usage_request(client: &Client, auth: &Auth) -> Result<Response, ProviderError> {
+    oauth_get(client, USAGE_URL, auth.token.as_str())
+        .send()
+        .await
+        .map_err(|_| ProviderError::Network)
+}
+
+fn is_rejected(response: &Response) -> bool {
+    matches!(
+        response.status(),
+        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
+    )
+}
+
+fn reload_auth(account: &AccountConfig) -> Result<Arc<Auth>, ProviderError> {
+    invalidate_managed_auth(account);
+    read_auth(account)
+}
+
+/// Exchanges a managed profile's refresh token for new tokens and saves them to the profile.
+/// Returns whether the stored credentials changed and should be read again.
+async fn refresh_managed_auth(
+    client: &Client,
+    account: &AccountConfig,
+    auth: &Auth,
+) -> Result<bool, ProviderError> {
+    if !auth.refreshable {
+        return Ok(false);
+    }
+    let Some(refresh_token) = auth.refresh_token.as_ref() else {
+        return Ok(false);
+    };
+    let Ok(response) = client
+        .post(TOKEN_URL)
+        .header(reqwest::header::USER_AGENT, USER_AGENT.as_str())
+        .json(&RefreshRequest {
+            grant_type: "refresh_token",
+            refresh_token: refresh_token.as_str(),
+            client_id: CLIENT_ID,
+            scope: (!auth.scopes.is_empty()).then(|| auth.scopes.join(" ")),
+        })
+        .send()
+        .await
+    else {
+        return Ok(false);
+    };
+    if !response.status().is_success() {
+        return Ok(false);
+    }
+    let Ok(refreshed) = response.json::<RefreshResponse>().await else {
+        return Ok(false);
+    };
+    if refreshed.access_token.is_empty() {
+        return Ok(false);
+    }
+    persist_refreshed_auth(account, auth, refreshed)?;
+    Ok(true)
+}
+
+fn persist_refreshed_auth(
+    account: &AccountConfig,
+    auth: &Auth,
+    refreshed: RefreshResponse,
+) -> Result<(), ProviderError> {
+    let path = credential_file(account);
+    let body = read_secret_file(path)?;
+    let mut file: serde_json::Map<String, serde_json::Value> = serde_json::from_str(body.as_str())
+        .map_err(|_| {
+            ProviderError::Credentials("Claude credential store is not valid JSON".into())
+        })?;
+    let oauth = file
+        .get_mut("claudeAiOauth")
+        .and_then(serde_json::Value::as_object_mut)
+        .ok_or_else(|| ProviderError::Credentials("Claude OAuth credentials are missing".into()))?;
+    // Another process already rotated the tokens; keep its newer copy.
+    if oauth
+        .get("refreshToken")
+        .and_then(serde_json::Value::as_str)
+        != auth.refresh_token.as_ref().map(|token| token.as_str())
+    {
+        return Ok(());
+    }
+    apply_refreshed_tokens(oauth, refreshed, Utc::now());
+    let encoded = Zeroizing::new(serde_json::to_vec(&file).map_err(|_| {
+        ProviderError::Credentials("could not encode refreshed Claude credentials".into())
+    })?);
+    write_secret_file(path, &encoded)
+}
+
+fn apply_refreshed_tokens(
+    oauth: &mut serde_json::Map<String, serde_json::Value>,
+    refreshed: RefreshResponse,
+    now: DateTime<Utc>,
+) {
+    oauth.insert("accessToken".into(), refreshed.access_token.into());
+    if let Some(refresh_token) = refreshed.refresh_token.filter(|token| !token.is_empty()) {
+        oauth.insert("refreshToken".into(), refresh_token.into());
+    }
+    match refreshed.expires_in {
+        Some(seconds) => {
+            let expiry = now + Duration::seconds(seconds.max(0));
+            oauth.insert("expiresAt".into(), expiry.timestamp_millis().into());
+        }
+        None => {
+            oauth.remove("expiresAt");
+        }
+    }
+    if let Some(scope) = refreshed.scope.filter(|scope| !scope.trim().is_empty()) {
+        let scopes = scope
+            .split_whitespace()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        oauth.insert("scopes".into(), scopes.into());
+    }
 }
 
 fn oauth_get(client: &Client, url: &str, token: &str) -> RequestBuilder {
@@ -222,7 +384,7 @@ fn read_auth(account: &AccountConfig) -> Result<Arc<Auth>, ProviderError> {
     match &account.credential_source {
         CredentialSource::File(path) => {
             let body = read_secret_file(path)?;
-            parse_auth(account, body.as_str()).map(Arc::new)
+            parse_auth(account, body.as_str(), false).map(Arc::new)
         }
         CredentialSource::ManagedProfile {
             profile,
@@ -234,8 +396,8 @@ fn read_auth(account: &AccountConfig) -> Result<Arc<Auth>, ProviderError> {
             }
             #[cfg(not(target_os = "macos"))]
             {
-                let body = read_managed_credentials(profile, credentials)?;
-                parse_auth(account, body.as_str()).map(Arc::new)
+                let (body, from_file) = read_managed_credentials(profile, credentials)?;
+                parse_auth(account, body.as_str(), from_file).map(Arc::new)
             }
         }
     }
@@ -254,8 +416,8 @@ fn read_cached_managed_auth(
         return Ok(Arc::clone(auth));
     }
 
-    let body = read_managed_credentials(profile, credentials)?;
-    let auth = Arc::new(parse_auth(account, body.as_str())?);
+    let (body, from_file) = read_managed_credentials(profile, credentials)?;
+    let auth = Arc::new(parse_auth(account, body.as_str(), from_file)?);
     cache.insert(profile.to_path_buf(), Arc::clone(&auth));
     Ok(auth)
 }
@@ -273,7 +435,8 @@ fn invalidate_managed_auth(account: &AccountConfig) {
 #[cfg(not(target_os = "macos"))]
 fn invalidate_managed_auth(_account: &AccountConfig) {}
 
-fn parse_auth(account: &AccountConfig, body: &str) -> Result<Auth, ProviderError> {
+/// `writable` marks a managed profile's own credential file, the only store aiwatch refreshes.
+fn parse_auth(account: &AccountConfig, body: &str, writable: bool) -> Result<Auth, ProviderError> {
     let credentials: Credentials = serde_json::from_str(body).map_err(|_| {
         ProviderError::Credentials("Claude credential store is not valid JSON".into())
     })?;
@@ -289,23 +452,36 @@ fn parse_auth(account: &AccountConfig, body: &str) -> Result<Auth, ProviderError
         .rate_limit_tier
         .or(oauth.subscription_type)
         .map(|value| prettify_plan(&value));
-    Ok(Auth { token, plan })
+    Ok(Auth {
+        token,
+        plan,
+        refresh_token: oauth
+            .refresh_token
+            .filter(|value| !value.is_empty())
+            .map(Zeroizing::new),
+        expires_at: oauth.expires_at.and_then(DateTime::from_timestamp_millis),
+        scopes: oauth.scopes,
+        refreshable: writable && is_managed(account),
+    })
 }
 
+/// Returns the credential body and whether it came from the profile's file. Keychain items are
+/// only read, never rewritten, so they are left for Claude Code to refresh.
 fn read_managed_credentials(
     _profile: &Path,
     credentials: &Path,
-) -> Result<Zeroizing<String>, ProviderError> {
+) -> Result<(Zeroizing<String>, bool), ProviderError> {
     #[cfg(target_os = "macos")]
     if let Some(body) = read_macos_keychain(_profile)? {
-        return Ok(body);
+        return Ok((body, false));
     }
 
-    read_secret_file(credentials).map_err(|_| {
+    let body = read_secret_file(credentials).map_err(|_| {
         ProviderError::Credentials(
             "managed Claude credentials are unavailable; run the account login command".into(),
         )
-    })
+    })?;
+    Ok((body, true))
 }
 
 #[cfg(target_os = "macos")]
@@ -457,6 +633,129 @@ mod tests {
         assert_eq!(snapshot.windows[0].used_percent, 42.5);
         assert_eq!(snapshot.windows[2].label, "Opus WEEKLY");
         assert_eq!(snapshot.details[0].value, "$12.34");
+    }
+
+    fn managed_account(credentials: std::path::PathBuf) -> AccountConfig {
+        AccountConfig {
+            credential_source: CredentialSource::ManagedProfile {
+                profile: credentials.parent().unwrap().into(),
+                credentials,
+            },
+            ..synthetic_account(Provider::Claude)
+        }
+    }
+
+    #[test]
+    fn only_managed_credential_files_are_refreshable() {
+        let body = r#"{"claudeAiOauth":{"accessToken":"a","refreshToken":"r","expiresAt":1790638525507,"scopes":["user:inference"]}}"#;
+        let managed = managed_account("profile/.credentials.json".into());
+        let auth = parse_auth(&managed, body, true).unwrap();
+        assert!(auth.refreshable);
+        assert_eq!(auth.scopes, ["user:inference"]);
+        assert_eq!(
+            auth.expires_at.map(|expiry| expiry.timestamp_millis()),
+            Some(1790638525507)
+        );
+        assert!(!parse_auth(&managed, body, false).unwrap().refreshable);
+        let official = synthetic_account(Provider::Claude);
+        assert!(!parse_auth(&official, body, true).unwrap().refreshable);
+    }
+
+    #[test]
+    fn refreshes_shortly_before_expiry() {
+        let now = Utc::now();
+        let auth = |expires_at| Auth {
+            token: Zeroizing::new("a".into()),
+            plan: None,
+            refresh_token: None,
+            expires_at,
+            scopes: Vec::new(),
+            refreshable: true,
+        };
+        assert!(!auth(Some(now + Duration::minutes(30))).needs_refresh(now));
+        assert!(auth(Some(now + Duration::minutes(4))).needs_refresh(now));
+        assert!(auth(Some(now - Duration::hours(1))).needs_refresh(now));
+        assert!(!auth(None).needs_refresh(now));
+    }
+
+    #[test]
+    fn refreshed_tokens_keep_subscription_metadata() {
+        let mut oauth = serde_json::json!({
+            "accessToken": "old-access",
+            "refreshToken": "old-refresh",
+            "expiresAt": 1,
+            "scopes": ["user:inference"],
+            "subscriptionType": "team",
+            "rateLimitTier": "default_claude_max_5x"
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let now = DateTime::parse_from_rfc3339("2026-09-28T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        apply_refreshed_tokens(
+            &mut oauth,
+            RefreshResponse {
+                access_token: "new-access".into(),
+                refresh_token: Some("new-refresh".into()),
+                expires_in: Some(28_800),
+                scope: Some("user:inference user:profile".into()),
+            },
+            now,
+        );
+
+        assert_eq!(oauth["accessToken"], "new-access");
+        assert_eq!(oauth["refreshToken"], "new-refresh");
+        assert_eq!(
+            oauth["expiresAt"],
+            (now + Duration::hours(8)).timestamp_millis()
+        );
+        assert_eq!(
+            oauth["scopes"],
+            serde_json::json!(["user:inference", "user:profile"])
+        );
+        assert_eq!(oauth["subscriptionType"], "team");
+        assert_eq!(oauth["rateLimitTier"], "default_claude_max_5x");
+    }
+
+    #[test]
+    fn persisting_writes_a_private_file_and_skips_tokens_rotated_elsewhere() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join(".credentials.json");
+        std::fs::write(
+            &path,
+            r#"{"claudeAiOauth":{"accessToken":"a","refreshToken":"r","subscriptionType":"team"},"mcpOAuth":{}}"#,
+        )
+        .unwrap();
+        let account = managed_account(path.clone());
+        let auth = parse_auth(&account, &std::fs::read_to_string(&path).unwrap(), true).unwrap();
+        let refreshed = || RefreshResponse {
+            access_token: "fresh".into(),
+            refresh_token: Some("fresh-refresh".into()),
+            expires_in: Some(3600),
+            scope: None,
+        };
+
+        persist_refreshed_auth(&account, &auth, refreshed()).unwrap();
+        let stored: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(stored["claudeAiOauth"]["accessToken"], "fresh");
+        assert_eq!(stored["claudeAiOauth"]["subscriptionType"], "team");
+        assert!(stored.get("mcpOAuth").is_some());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+
+        // `auth` still holds the old refresh token, as if another process refreshed first.
+        persist_refreshed_auth(&account, &auth, refreshed()).unwrap();
+        let unchanged: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(unchanged, stored);
     }
 
     #[test]
