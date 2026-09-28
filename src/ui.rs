@@ -40,7 +40,9 @@ const RED: Color = Color::Rgb(0xf8, 0x71, 0x71);
 
 /// Terminals at least this wide show two account cards per row.
 const TWO_COLUMN_MIN_WIDTH: usize = 100;
-const COLUMN_GAP: usize = 2;
+const COLUMN_GAP: usize = 3;
+/// Blank columns between a card's side borders and its content.
+const CARD_PAD_X: usize = 2;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ViewMode {
@@ -348,8 +350,8 @@ fn card_row_lines(row: &[dashboard::AccountCard<'_>], card_width: usize) -> Vec<
 }
 
 fn card_lines(card: &dashboard::AccountCard<'_>, width: usize) -> Vec<Line<'static>> {
-    let inner = width.saturating_sub(2);
-    let mut body = Vec::new();
+    let inner = content_width(width);
+    let mut body = vec![blank_line()];
     if let Some(summary) = &card.summary {
         body.push(summary_line(summary, inner));
     }
@@ -361,11 +363,12 @@ fn card_lines(card: &dashboard::AccountCard<'_>, width: usize) -> Vec<Line<'stat
             )));
         }
     } else {
-        body.push(blank_line());
         for meter in &card.meters {
+            body.push(blank_line());
             body.push(meter_line(meter, inner));
         }
     }
+    body.push(blank_line());
     let mut lines = vec![top_border(card, width)];
     for line in body {
         lines.push(side_frame(line, width));
@@ -380,7 +383,9 @@ fn top_border(card: &dashboard::AccountCard<'_>, width: usize) -> Line<'static> 
     } else {
         health_color(card.account.health.state)
     };
-    let inner = width.saturating_sub(2);
+    // The leading dashes line the title's dot up with the padded content below it.
+    let lead = "─".repeat(CARD_PAD_X - 1);
+    let inner = width.saturating_sub(2 + lead.chars().count());
     let name = card
         .account_name
         .as_deref()
@@ -411,7 +416,7 @@ fn top_border(card: &dashboard::AccountCard<'_>, width: usize) -> Line<'static> 
         Style::default().fg(DIM),
     ));
     title.push(Span::styled(right, Style::default().fg(META)));
-    let mut spans = vec![Span::styled("╭", Style::default().fg(DIM))];
+    let mut spans = vec![Span::styled(format!("╭{lead}"), Style::default().fg(DIM))];
     spans.extend(fit_spans(title, inner));
     spans.push(Span::styled("╮", Style::default().fg(DIM)));
     Line::from(spans)
@@ -475,18 +480,26 @@ fn bottom_border(width: usize) -> Line<'static> {
     ])
 }
 
+/// Columns left for content once a card of `width` gives up its borders and padding.
+fn content_width(width: usize) -> usize {
+    width.saturating_sub(2 + 2 * CARD_PAD_X)
+}
+
 fn side_frame(line: Line<'static>, width: usize) -> Line<'static> {
-    let inner = width.saturating_sub(2);
+    let inner = content_width(width);
     let content = fit_spans(line.spans, inner);
     let used = content
         .iter()
         .map(|span| span.content.chars().count())
         .sum::<usize>();
-    let mut spans = vec![Span::styled("│", Style::default().fg(DIM))];
+    let pad = " ".repeat(CARD_PAD_X);
+    let mut spans = vec![
+        Span::styled("│", Style::default().fg(DIM)),
+        Span::raw(pad.clone()),
+    ];
     spans.extend(content);
-    if used < inner {
-        spans.push(Span::raw(" ".repeat(inner - used)));
-    }
+    spans.push(Span::raw(" ".repeat(inner.saturating_sub(used))));
+    spans.push(Span::raw(pad));
     spans.push(Span::styled("│", Style::default().fg(DIM)));
     Line::from(spans)
 }
@@ -1218,6 +1231,28 @@ mod tests {
         }
         assert!(card_rows >= 3);
         assert!(buffer_text(&buffer).contains('…'));
+    }
+
+    #[test]
+    fn cards_pad_their_content_and_space_meter_rows() {
+        let buffer = draw_overview(160, 48, &AppState::new());
+        let title_y = (0..buffer.area.height)
+            .find(|y| buffer_line(&buffer, *y).contains("● claude work"))
+            .expect("claude work title");
+        let rows = (title_y..title_y + 9)
+            .map(|y| buffer_line(&buffer, y))
+            .collect::<Vec<_>>();
+        let card = |row: &str| row.chars().take(10).collect::<String>();
+
+        assert!(rows[0].starts_with("╭─ ●"), "{}", rows[0]);
+        assert_eq!(card(&rows[1]).trim_end(), "│");
+        assert!(card(&rows[2]).starts_with("│  53%"), "{}", rows[2]);
+        assert_eq!(card(&rows[3]).trim_end(), "│");
+        assert!(card(&rows[4]).starts_with("│  session"), "{}", rows[4]);
+        assert_eq!(card(&rows[5]).trim_end(), "│");
+        assert!(card(&rows[6]).starts_with("│  week"), "{}", rows[6]);
+        assert_eq!(card(&rows[7]).trim_end(), "│");
+        assert!(rows[8].starts_with('╰'), "{}", rows[8]);
     }
 
     #[test]
