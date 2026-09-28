@@ -352,28 +352,25 @@ fn card_row_lines(row: &[dashboard::AccountCard<'_>], card_width: usize) -> Vec<
 fn card_lines(card: &dashboard::AccountCard<'_>, width: usize) -> Vec<Line<'static>> {
     let inner = content_width(width);
     let mut body = vec![blank_line()];
-    if let Some(summary) = &card.summary {
-        body.push(summary_line(summary, inner));
-    }
     if card.meters.is_empty() {
         if let Some(notice) = &card.notice {
             body.push(Line::from(Span::styled(
                 notice.clone(),
                 Style::default().fg(health_color(card.account.health.state)),
             )));
+            body.push(blank_line());
         }
     } else {
         for meter in &card.meters {
-            body.push(blank_line());
             body.push(meter_line(meter, inner));
+            body.push(blank_line());
         }
     }
-    body.push(blank_line());
     let mut lines = vec![top_border(card, width)];
     for line in body {
         lines.push(side_frame(line, width));
     }
-    lines.push(bottom_border(width));
+    lines.push(bottom_border(card.empty_in.as_deref(), width));
     lines
 }
 
@@ -471,13 +468,24 @@ fn fit_spans(spans: Vec<Span<'static>>, width: usize) -> Vec<Span<'static>> {
     fitted
 }
 
-fn bottom_border(width: usize) -> Line<'static> {
+/// Closes a card, naming on its right edge how soon the account runs dry when it will.
+fn bottom_border(empty_in: Option<&str>, width: usize) -> Line<'static> {
     let inner = width.saturating_sub(2);
-    Line::from(vec![
-        Span::styled("╰", Style::default().fg(DIM)),
-        Span::styled("─".repeat(inner), Style::default().fg(DIM)),
-        Span::styled("╯", Style::default().fg(DIM)),
-    ])
+    let tail = "─".repeat(CARD_PAD_X - 1);
+    let label = empty_in
+        .map(|empty_in| format!(" empty in {empty_in} "))
+        .filter(|label| label.chars().count() + tail.chars().count() < inner)
+        .unwrap_or_default();
+    let dashes = inner.saturating_sub(label.chars().count() + tail.chars().count());
+    let mut spans = vec![Span::styled(
+        format!("╰{}", "─".repeat(dashes)),
+        Style::default().fg(DIM),
+    )];
+    if !label.is_empty() {
+        spans.push(Span::styled(label, Style::default().fg(GOLD)));
+    }
+    spans.push(Span::styled(format!("{tail}╯"), Style::default().fg(DIM)));
+    Line::from(spans)
 }
 
 /// Columns left for content once a card of `width` gives up its borders and padding.
@@ -501,30 +509,6 @@ fn side_frame(line: Line<'static>, width: usize) -> Line<'static> {
     spans.push(Span::raw(" ".repeat(inner.saturating_sub(used))));
     spans.push(Span::raw(pad));
     spans.push(Span::styled("│", Style::default().fg(DIM)));
-    Line::from(spans)
-}
-
-fn summary_line(summary: &dashboard::CardSummary, width: usize) -> Line<'static> {
-    let percent = dashboard::percent_label(summary.percent);
-    let mut spans = vec![
-        Span::styled(percent, Style::default().fg(GOLD)),
-        Span::styled(format!(" {}", summary.label), Style::default().fg(MUTED)),
-        Span::raw(" "),
-    ];
-    let used = spans
-        .iter()
-        .map(|span| span.content.chars().count())
-        .sum::<usize>();
-    let right = format!("empty in {}", summary.empty_in.as_deref().unwrap_or("—"));
-    let bar_width = width.saturating_sub(used + 1 + right.chars().count());
-    spans.extend(rail_spans(
-        summary.percent,
-        summary.pace,
-        bar_width,
-        tone_color(summary.tone),
-    ));
-    spans.push(Span::raw(" "));
-    spans.push(Span::styled(right, Style::default().fg(GOLD)));
     Line::from(spans)
 }
 
@@ -1239,20 +1223,52 @@ mod tests {
         let title_y = (0..buffer.area.height)
             .find(|y| buffer_line(&buffer, *y).contains("● claude work"))
             .expect("claude work title");
-        let rows = (title_y..title_y + 9)
+        let rows = (title_y..title_y + 7)
             .map(|y| buffer_line(&buffer, y))
             .collect::<Vec<_>>();
         let card = |row: &str| row.chars().take(10).collect::<String>();
 
         assert!(rows[0].starts_with("╭─ ●"), "{}", rows[0]);
         assert_eq!(card(&rows[1]).trim_end(), "│");
-        assert!(card(&rows[2]).starts_with("│  53%"), "{}", rows[2]);
+        assert!(card(&rows[2]).starts_with("│  session"), "{}", rows[2]);
         assert_eq!(card(&rows[3]).trim_end(), "│");
-        assert!(card(&rows[4]).starts_with("│  session"), "{}", rows[4]);
+        assert!(card(&rows[4]).starts_with("│  week"), "{}", rows[4]);
         assert_eq!(card(&rows[5]).trim_end(), "│");
-        assert!(card(&rows[6]).starts_with("│  week"), "{}", rows[6]);
-        assert_eq!(card(&rows[7]).trim_end(), "│");
-        assert!(rows[8].starts_with('╰'), "{}", rows[8]);
+        assert!(rows[6].starts_with('╰'), "{}", rows[6]);
+    }
+
+    #[test]
+    fn each_card_reports_weekly_usage_once_with_bars_of_one_length() {
+        let buffer = draw_overview(160, 48, &AppState::new());
+        let text = buffer_text(&buffer);
+        assert!(!text.contains("% week"), "{text}");
+        // The demo's claude work card burns its session before reset.
+        assert!(
+            text.lines()
+                .any(|line| line.starts_with('╰') && line.contains("empty in")),
+            "{text}"
+        );
+
+        // Every meter row's rail spans the same columns within its card, in both card columns.
+        let card_width = (160 - COLUMN_GAP) / 2;
+        let is_rail = |cell: &str| matches!(cell, "━" | "╸" | "╺" | "─" | "┃");
+        let mut rails = Vec::new();
+        for y in 0..buffer.area.height {
+            for left in [0, card_width + COLUMN_GAP] {
+                let cells = (left..left + card_width)
+                    .map(|x| buffer[(x as u16, y)].symbol().to_string())
+                    .collect::<Vec<_>>();
+                let label = cells[3..10].concat();
+                if cells[0] != "│" || label.trim().is_empty() {
+                    continue;
+                }
+                let first = cells.iter().position(|cell| is_rail(cell)).unwrap();
+                let last = cells.iter().rposition(|cell| is_rail(cell)).unwrap();
+                rails.push((first, last));
+            }
+        }
+        assert!(rails.len() >= 9, "{rails:?}");
+        assert!(rails.windows(2).all(|pair| pair[0] == pair[1]), "{rails:?}");
     }
 
     #[test]
