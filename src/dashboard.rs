@@ -401,17 +401,6 @@ pub fn meter_columns(width: usize) -> MeterColumns {
     }
 }
 
-pub const SUMMARY_BAR_WIDTH: usize = 10;
-
-#[derive(Debug, Clone)]
-pub struct CardSummary {
-    pub percent: f64,
-    pub label: String,
-    pub pace: Option<f64>,
-    pub empty_in: Option<String>,
-    pub tone: MeterTone,
-}
-
 #[derive(Debug, Clone)]
 pub struct CardMeter {
     pub label: String,
@@ -429,7 +418,8 @@ pub struct AccountCard<'a> {
     pub email: Option<String>,
     pub plan: Option<String>,
     pub auth: &'static str,
-    pub summary: Option<CardSummary>,
+    /// How long until the fastest-burning window runs out before it resets, if it will.
+    pub empty_in: Option<String>,
     pub meters: Vec<CardMeter>,
     pub notice: Option<String>,
 }
@@ -478,25 +468,7 @@ pub fn account_card<'a>(
         .iter()
         .filter(|window| window_is_weekly_view(window, weekly_only))
         .collect();
-    let summary_window = visible
-        .iter()
-        .copied()
-        .find(|window| meter_label(window) == "week")
-        .or_else(|| {
-            visible
-                .iter()
-                .copied()
-                .find(|window| window.class() == WindowClass::SevenDay)
-        })
-        .or_else(|| visible.first().copied());
     let empty_in = soonest_empty(visible.iter().copied(), now).map(format_duration);
-    let summary = summary_window.map(|window| CardSummary {
-        percent: window.used_percent,
-        label: meter_label(window),
-        pace: window.pace_used_percent(now),
-        empty_in,
-        tone: meter_tone(window),
-    });
     let meters = visible
         .iter()
         .copied()
@@ -535,7 +507,7 @@ pub fn account_card<'a>(
             .map(|plan| plan.trim().to_ascii_lowercase())
             .filter(|plan| !plan.is_empty()),
         auth: card_auth_label(account),
-        summary,
+        empty_in,
         meters,
         notice,
     }
@@ -552,18 +524,17 @@ pub fn status_line(account_count: usize, profile: ProfileFilter, poll: PollDurat
 
 pub fn render_card_text(card: &AccountCard<'_>, width: usize) -> String {
     let mut lines = vec![identity_line(card, width)];
-    if let Some(summary) = &card.summary {
-        lines.push(summary_line(summary, width));
-    }
     if card.meters.is_empty() {
         if let Some(notice) = &card.notice {
             lines.push(pad_cell(notice, width));
         }
     } else {
-        lines.push(String::new());
         for meter in &card.meters {
             lines.push(meter_line(meter, width));
         }
+    }
+    if let Some(empty_in) = &card.empty_in {
+        lines.push(align_right(&format!("empty in {empty_in}"), width));
     }
     lines.join("\n")
 }
@@ -583,13 +554,6 @@ fn identity_line(card: &AccountCard<'_>, width: usize) -> String {
         None => format!("● {}", card.auth),
     };
     align_edges(&left, &right, width)
-}
-
-fn summary_line(summary: &CardSummary, width: usize) -> String {
-    let bar = usage_bar(summary.percent, SUMMARY_BAR_WIDTH.min(width), summary.pace);
-    let left = format!("{} {} {bar}", percent_label(summary.percent), summary.label);
-    let empty = summary.empty_in.as_deref().unwrap_or("—");
-    align_edges(&left, &format!("empty in {empty}"), width)
 }
 
 fn meter_line(meter: &CardMeter, width: usize) -> String {
@@ -1136,6 +1100,10 @@ mod tests {
         assert!(text.contains("session"));
         assert!(text.contains("week"));
         assert!(text.contains("empty in"));
+        assert!(
+            !text.lines().any(|line| line.contains("% week")),
+            "only the week meter reports weekly usage"
+        );
         assert!(text.contains('│'));
         assert!(!text.contains("ACCOUNT"));
         assert!(!text.contains("7D PEAK"));
@@ -1208,7 +1176,7 @@ mod tests {
             PollDuration::from_secs(300),
             now,
         );
-        assert!(slow_text.contains("empty in —"), "{slow_text}");
+        assert!(!slow_text.contains("empty in"), "{slow_text}");
         assert!(!slow_text.contains("nearest cap"));
     }
 
@@ -1230,7 +1198,10 @@ mod tests {
             PollDuration::from_secs(300),
             fixed_now(),
         );
-        assert!(text.contains("40% week"));
+        assert!(
+            text.lines()
+                .any(|line| line.starts_with("week ") && line.contains("40%"))
+        );
         assert!(text.lines().any(|line| line.starts_with("sonnet")));
         assert!(text.lines().any(|line| line.starts_with("month")));
         assert!(!text.contains("73%"));
