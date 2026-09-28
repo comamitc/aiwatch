@@ -426,6 +426,7 @@ pub struct AccountCard<'a> {
     pub account: &'a AccountSnapshot,
     pub title: String,
     pub account_name: Option<String>,
+    pub email: Option<String>,
     pub plan: Option<String>,
     pub auth: &'static str,
     pub summary: Option<CardSummary>,
@@ -522,6 +523,12 @@ pub fn account_card<'a>(
         account,
         title: account.provider.key().to_string(),
         account_name: card_account_name(account),
+        email: account
+            .email
+            .as_deref()
+            .map(str::trim)
+            .filter(|email| !email.is_empty())
+            .map(str::to_owned),
         plan: account
             .plan
             .as_deref()
@@ -566,6 +573,10 @@ fn identity_line(card: &AccountCard<'_>, width: usize) -> String {
     if let Some(name) = &card.account_name {
         left.push(' ');
         left.push_str(name);
+    }
+    if let Some(email) = &card.email {
+        left.push_str(" · ");
+        left.push_str(email);
     }
     let right = match &card.plan {
         Some(plan) => format!("{plan} ● {}", card.auth),

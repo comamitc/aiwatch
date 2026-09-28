@@ -1,4 +1,5 @@
 {
+  "email": "coder@example.com",
   "plan_type": "plus",
   "rate_limit": {
     "allowed": true,

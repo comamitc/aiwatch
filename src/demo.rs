@@ -106,6 +106,7 @@ fn account(
         id: id.into(),
         name: name.into(),
         provider,
+        email: Some(format!("{name}@example.com")),
         plan: plan.map(str::to_owned),
         windows,
         details,
