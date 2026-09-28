@@ -67,8 +67,9 @@ impl AccountManager {
         }
     }
 
-    pub fn add(&self, provider: Provider, name: &str) -> Result<PathBuf> {
+    pub fn add(&self, provider: Provider, name: &str, device_auth: bool) -> Result<PathBuf> {
         validate_managed_name(name)?;
+        check_device_auth(provider, device_auth)?;
         self.ensure_provider_root(provider)?;
         let profile = self.profile(provider, name);
         fs::create_dir(&profile).with_context(|| {
@@ -79,13 +80,14 @@ impl AccountManager {
         })?;
         set_private_directory_permissions(&profile)?;
         initialize_profile(provider, &profile)?;
-        self.run_login(provider, &profile)?;
+        self.run_login(provider, &profile, device_auth)?;
         Ok(profile)
     }
 
-    pub fn login(&self, provider: Provider, name: &str) -> Result<PathBuf> {
+    pub fn login(&self, provider: Provider, name: &str, device_auth: bool) -> Result<PathBuf> {
+        check_device_auth(provider, device_auth)?;
         let profile = self.existing_profile(provider, name)?;
-        self.run_login(provider, &profile)?;
+        self.run_login(provider, &profile, device_auth)?;
         Ok(profile)
     }
 
@@ -141,17 +143,20 @@ impl AccountManager {
         Ok(())
     }
 
-    fn run_login(&self, provider: Provider, profile: &Path) -> Result<ExitStatus> {
-        match provider {
-            Provider::Claude => self.run_provider(
-                provider,
-                profile,
-                [OsString::from("auth"), OsString::from("login")],
-            ),
-            Provider::Codex | Provider::Grok => {
-                self.run_provider(provider, profile, [OsString::from("login")])
-            }
+    fn run_login(
+        &self,
+        provider: Provider,
+        profile: &Path,
+        device_auth: bool,
+    ) -> Result<ExitStatus> {
+        let mut args = match provider {
+            Provider::Claude => vec![OsString::from("auth"), OsString::from("login")],
+            Provider::Codex | Provider::Grok => vec![OsString::from("login")],
+        };
+        if device_auth {
+            args.push(OsString::from("--device-auth"));
         }
+        self.run_provider(provider, profile, args)
     }
 
     fn run_provider<I>(&self, provider: Provider, profile: &Path, args: I) -> Result<ExitStatus>
@@ -170,6 +175,17 @@ impl AccountManager {
         }
         Ok(status)
     }
+}
+
+/// Device-code login avoids the localhost callback, so it works over SSH. Claude Code has no such
+/// flag; its login already shows a code to paste back, which works remotely as-is.
+fn check_device_auth(provider: Provider, device_auth: bool) -> Result<()> {
+    if device_auth && provider == Provider::Claude {
+        bail!(
+            "claude has no device-code login; run without --device-auth and paste the code the browser shows"
+        );
+    }
+    Ok(())
 }
 
 pub fn managed_accounts_root(home: &Path) -> PathBuf {
@@ -377,7 +393,7 @@ mod tests {
         let root = temp.path().join("accounts");
         let manager = AccountManager::with_paths(root, fake_binary);
         for provider in Provider::ALL {
-            let profile = manager.add(provider, "work").unwrap();
+            let profile = manager.add(provider, "work", false).unwrap();
             let invocation = fs::read_to_string(profile.join("invocation")).unwrap();
             let lines = invocation.lines().collect::<Vec<_>>();
             let expected_args = if provider == Provider::Claude {
@@ -416,5 +432,15 @@ mod tests {
                 0o700
             );
         }
+
+        for provider in [Provider::Codex, Provider::Grok] {
+            let profile = manager.login(provider, "work", true).unwrap();
+            let invocation = fs::read_to_string(profile.join("invocation")).unwrap();
+            assert_eq!(invocation.lines().next(), Some("login --device-auth"));
+        }
+        let error = manager.login(Provider::Claude, "work", true).unwrap_err();
+        assert!(error.to_string().contains("no device-code login"));
+        assert!(manager.add(Provider::Claude, "remote", true).is_err());
+        assert!(!temp.path().join("accounts/claude/remote").exists());
     }
 }

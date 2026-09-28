@@ -96,6 +96,15 @@ aiwatch account login codex personal
 aiwatch account login grok work
 ```
 
+On a remote machine, where the browser cannot reach the CLI's localhost callback, sign Codex and Grok in with a device code instead:
+
+```console
+aiwatch account login codex work --device-auth
+aiwatch account add grok personal --device-auth
+```
+
+Claude Code has no device-code flag; its login already shows a code to paste back into the terminal, which works over SSH.
+
 Managed profiles are discovered automatically by the dashboard. They live under the operating system's local data directory: `~/Library/Application Support/aiwatch/accounts/<provider>/` on macOS and `${XDG_DATA_HOME:-~/.local/share}/aiwatch/accounts/<provider>/` on Linux.
 
 Isolation uses each CLI's own configuration root:
@@ -128,7 +137,15 @@ A managed profile suppresses automatic discovery of that provider's `default` pr
 
 Grok also respects `GROK_AUTH_PATH` and `GROK_HOME`. On macOS, use a managed Claude account because the default Claude login is normally stored in Keychain rather than `~/.claude/.credentials.json`.
 
-`aiwatch` reads credentials in memory for authenticated quota requests. It never copies tokens into its configuration or history database. Managed Grok profiles refresh expiring or rejected OIDC access tokens through xAI's fixed token endpoint and atomically persist rotated credentials with owner-only permissions. Claude and Codex tokens remain provider-managed; re-run the matching `aiwatch account login` command when those profiles require authentication.
+`aiwatch` reads credentials in memory for authenticated quota requests. It never copies tokens into its configuration or history database. Managed profiles belong to `aiwatch`, so it keeps their logins alive without the provider CLI ever running in them. When an access token is about to expire, or a quota request is rejected, `aiwatch` exchanges the profile's refresh token at the provider's fixed token endpoint, using the official CLI's OAuth client, and atomically persists the rotated credentials with owner-only permissions:
+
+| Provider | Token endpoint | Refreshes when |
+| --- | --- | --- |
+| Claude | `platform.claude.com/v1/oauth/token` | within 5 minutes of `expiresAt` (tokens last hours), or on 401/403 |
+| Codex | `auth.openai.com/oauth/token` | `last_refresh` is 8 days old (tokens last about 10), or on 401/403 |
+| Grok | `auth.x.ai/oauth2/token` | within 5 minutes of `expires_at`, or on 401/403 |
+
+If another process rotated the tokens first, `aiwatch` keeps that newer copy instead of overwriting it. Credentials maintained by an official CLI (`~/.claude`, `~/.codex`, `~/.grok`) and managed Claude logins held in the macOS Keychain are only read; the CLI refreshes those itself. Re-run the matching `aiwatch account login` command if a refresh token is revoked or expires.
 
 API keys do not expose consumer subscription allowances. The provider CLI must be logged into the subscription account.
 
