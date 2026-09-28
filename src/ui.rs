@@ -38,6 +38,10 @@ const GROK: Color = Color::Rgb(0x93, 0xc5, 0xfd);
 const YELLOW: Color = Color::Rgb(0xea, 0xb3, 0x08);
 const RED: Color = Color::Rgb(0xf8, 0x71, 0x71);
 
+/// Terminals at least this wide show two account cards per row.
+const TWO_COLUMN_MIN_WIDTH: usize = 100;
+const COLUMN_GAP: usize = 2;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ViewMode {
     Summary,
@@ -291,6 +295,11 @@ fn render_overview_body(
         now,
     );
     let width = area.width as usize;
+    let (columns, card_width) = if width >= TWO_COLUMN_MIN_WIDTH {
+        (2, (width - COLUMN_GAP) / 2)
+    } else {
+        (1, width)
+    };
     let mut lines = Vec::new();
     if cards.is_empty() {
         lines.push(Line::from(Span::styled(
@@ -298,11 +307,11 @@ fn render_overview_body(
             Style::default().fg(YELLOW).bg(BG),
         )));
     }
-    for (index, card) in cards.iter().enumerate() {
+    for (index, row) in cards.chunks(columns).enumerate() {
         if index > 0 {
             lines.push(blank_line());
         }
-        lines.extend(card_lines(card, width));
+        lines.extend(card_row_lines(row, card_width));
     }
     frame.render_widget(
         Paragraph::new(lines)
@@ -310,6 +319,32 @@ fn render_overview_body(
             .scroll((state.scroll, 0)),
         area,
     );
+}
+
+/// Joins cards side by side, stretching shorter cards so every border in the row lines up.
+fn card_row_lines(row: &[dashboard::AccountCard<'_>], card_width: usize) -> Vec<Line<'static>> {
+    let mut cards = row
+        .iter()
+        .map(|card| card_lines(card, card_width))
+        .collect::<Vec<_>>();
+    let height = cards.iter().map(Vec::len).max().unwrap_or(0);
+    for lines in &mut cards {
+        while lines.len() < height {
+            lines.insert(lines.len() - 1, side_frame(blank_line(), card_width));
+        }
+    }
+    (0..height)
+        .map(|y| {
+            let mut spans = Vec::new();
+            for (column, lines) in cards.iter_mut().enumerate() {
+                if column > 0 {
+                    spans.push(Span::raw(" ".repeat(COLUMN_GAP)));
+                }
+                spans.append(&mut lines[y].spans);
+            }
+            Line::from(spans)
+        })
+        .collect()
 }
 
 fn card_lines(card: &dashboard::AccountCard<'_>, width: usize) -> Vec<Line<'static>> {
@@ -356,14 +391,79 @@ fn top_border(card: &dashboard::AccountCard<'_>, width: usize) -> Line<'static> 
         Some(plan) => format!(" {plan} · {} ", card.auth),
         None => format!(" {} ", card.auth),
     };
-    let dashes = inner.saturating_sub(left.chars().count() + right.chars().count());
-    Line::from(vec![
-        Span::styled("╭", Style::default().fg(DIM)),
-        Span::styled(left, Style::default().fg(accent)),
-        Span::styled("─".repeat(dashes), Style::default().fg(DIM)),
-        Span::styled(right, Style::default().fg(META)),
-        Span::styled("╮", Style::default().fg(DIM)),
-    ])
+    let right_width = right.chars().count();
+    let mut used = left.chars().count();
+    let mut title = vec![Span::styled(left, Style::default().fg(accent))];
+    // The email sits between the name and the plan, keeping at least one dash before the plan.
+    let email_room = inner.saturating_sub(used + right_width + 1);
+    if let Some(email) = card
+        .email
+        .as_deref()
+        .and_then(|email| fit_email(email, email_room.saturating_sub(3)))
+    {
+        used += email.chars().count() + 3;
+        title.push(Span::styled("· ", Style::default().fg(DIM)));
+        title.push(Span::styled(email, Style::default().fg(FG)));
+        title.push(Span::raw(" "));
+    }
+    title.push(Span::styled(
+        "─".repeat(inner.saturating_sub(used + right_width)),
+        Style::default().fg(DIM),
+    ));
+    title.push(Span::styled(right, Style::default().fg(META)));
+    let mut spans = vec![Span::styled("╭", Style::default().fg(DIM))];
+    spans.extend(fit_spans(title, inner));
+    spans.push(Span::styled("╮", Style::default().fg(DIM)));
+    Line::from(spans)
+}
+
+/// Shortens an email to `width` columns, or drops it when too little of it would remain to
+/// recognise the account.
+fn fit_email(email: &str, width: usize) -> Option<String> {
+    const MIN_WIDTH: usize = 6;
+    let length = email.chars().count();
+    if length <= width {
+        Some(email.to_string())
+    } else if width >= MIN_WIDTH {
+        let mut short = email.chars().take(width - 1).collect::<String>();
+        short.push('…');
+        Some(short)
+    } else {
+        None
+    }
+}
+
+/// Cuts spans to `width` columns, ending in an ellipsis, so side-by-side cards never overlap.
+fn fit_spans(spans: Vec<Span<'static>>, width: usize) -> Vec<Span<'static>> {
+    let total = spans
+        .iter()
+        .map(|span| span.content.chars().count())
+        .sum::<usize>();
+    if total <= width {
+        return spans;
+    }
+    let mut remaining = width.saturating_sub(1);
+    let mut fitted = Vec::new();
+    let mut style = Style::default();
+    for span in spans {
+        if remaining == 0 {
+            break;
+        }
+        style = span.style;
+        let length = span.content.chars().count();
+        if length <= remaining {
+            remaining -= length;
+            fitted.push(span);
+        } else {
+            let content = span.content.chars().take(remaining).collect::<String>();
+            fitted.push(Span::styled(content, style));
+            remaining = 0;
+        }
+    }
+    if width > 0 {
+        fitted.push(Span::styled("…", style));
+    }
+    fitted
 }
 
 fn bottom_border(width: usize) -> Line<'static> {
@@ -377,13 +477,13 @@ fn bottom_border(width: usize) -> Line<'static> {
 
 fn side_frame(line: Line<'static>, width: usize) -> Line<'static> {
     let inner = width.saturating_sub(2);
-    let used = line
-        .spans
+    let content = fit_spans(line.spans, inner);
+    let used = content
         .iter()
         .map(|span| span.content.chars().count())
         .sum::<usize>();
     let mut spans = vec![Span::styled("│", Style::default().fg(DIM))];
-    spans.extend(line.spans);
+    spans.extend(content);
     if used < inner {
         spans.push(Span::raw(" ".repeat(inner - used)));
     }
@@ -1037,11 +1137,100 @@ mod tests {
         assert!(text.contains("session"));
 
         let mut state = AppState::new();
-        state.scroll = 24;
+        state.scroll = 7;
         let scrolled = draw_overview(160, 12, &state);
         let scrolled_text = buffer_text(&scrolled);
         assert!(buffer_line(&scrolled, 0).contains("aiwatch"));
         assert!(scrolled_text.contains("codex") || scrolled_text.contains("grok"));
+    }
+
+    #[test]
+    fn wide_overview_places_two_cards_per_row() {
+        let buffer = draw_overview(160, 40, &AppState::new());
+        let y = (0..buffer.area.height)
+            .find(|y| buffer_line(&buffer, *y).contains("● claude work"))
+            .expect("claude work title");
+        let line = buffer_line(&buffer, y);
+        assert!(line.contains("● claude personal"), "{line}");
+        assert_eq!(line.matches('╭').count(), 2, "{line}");
+    }
+
+    #[test]
+    fn narrow_overview_keeps_one_card_per_row() {
+        let buffer = draw_overview(90, 60, &AppState::new());
+        assert!((0..buffer.area.height).all(|y| buffer_line(&buffer, y).matches('╭').count() <= 1));
+        assert!(buffer_text(&buffer).contains("● claude personal"));
+    }
+
+    #[test]
+    fn card_titles_show_the_account_email() {
+        let text = buffer_text(&draw_overview(160, 40, &AppState::new()));
+        assert!(text.contains("● claude work · work@example.com"), "{text}");
+        assert!(text.contains("personal@example.com"));
+    }
+
+    #[test]
+    fn side_by_side_cards_stay_aligned_when_content_overflows() {
+        let now = Utc::now();
+        let mut snapshot = DashboardSnapshot {
+            generated_at: now,
+            accounts: Vec::new(),
+        };
+        let mut failing = AccountSnapshot::empty(
+            "claude:work",
+            "work",
+            Provider::Claude,
+            FetchHealth::failure(
+                HealthState::AuthenticationRequired,
+                "authentication required: run `aiwatch account login claude work` to sign in again",
+                Some(401),
+            ),
+        );
+        failing.email = Some("someone.with.a.very.long.address@subdomain.example.com".into());
+        failing.plan = Some("team".into());
+        snapshot.accounts.push(failing);
+        snapshot.accounts.push(AccountSnapshot::empty(
+            "codex:work",
+            "work",
+            Provider::Codex,
+            FetchHealth::ok(),
+        ));
+
+        let buffer = draw_snapshot(&snapshot, &AppState::new(), 100, 12, now);
+        let card_width = (100 - COLUMN_GAP as u16) / 2;
+        let right_start = card_width + COLUMN_GAP as u16;
+        let mut card_rows = 0;
+        for y in 1..buffer.area.height - 1 {
+            let left_edge = buffer[(0, y)].symbol();
+            if !matches!(left_edge, "╭" | "│" | "╰") {
+                continue;
+            }
+            card_rows += 1;
+            let line = buffer_line(&buffer, y);
+            assert!(
+                matches!(buffer[(card_width - 1, y)].symbol(), "╮" | "│" | "╯"),
+                "{line}"
+            );
+            assert!(
+                matches!(buffer[(right_start, y)].symbol(), "╭" | "│" | "╰"),
+                "{line}"
+            );
+        }
+        assert!(card_rows >= 3);
+        assert!(buffer_text(&buffer).contains('…'));
+    }
+
+    #[test]
+    fn long_emails_shorten_and_tiny_ones_drop() {
+        assert_eq!(
+            fit_email("a@example.com", 20).as_deref(),
+            Some("a@example.com")
+        );
+        assert_eq!(
+            fit_email("someone@example.com", 10).as_deref(),
+            Some("someone@e…")
+        );
+        assert_eq!(fit_email("someone@example.com", 5), None);
     }
 
     fn row_has_fg(buffer: &Buffer, y: u16, color: Color) -> bool {

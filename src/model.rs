@@ -230,6 +230,9 @@ pub struct AccountSnapshot {
     pub id: String,
     pub name: String,
     pub provider: Provider,
+    /// Email of the identity behind the credentials, as reported by the provider on each poll.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plan: Option<String>,
     pub windows: Vec<UsageWindow>,
@@ -252,6 +255,7 @@ impl AccountSnapshot {
             id: id.into(),
             name: name.into(),
             provider,
+            email: None,
             plan: None,
             windows: Vec::new(),
             details: Vec::new(),

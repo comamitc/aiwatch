@@ -46,6 +46,8 @@ aiwatch --no-history          # disable local SQLite snapshots
 aiwatch --demo --once         # safe static preview
 ```
 
+Terminals at least 100 columns wide show account cards two per row; narrower terminals stack them.
+
 Interactive keys:
 
 | Key | Action |
@@ -108,7 +110,9 @@ Isolation uses each CLI's own configuration root:
 
 On macOS, `aiwatch` reads each managed Claude Keychain item through Apple's stable, signed `/usr/bin/security` helper and caches the parsed credential in zeroizing memory. The replaceable `aiwatch` executable never requests Keychain access directly, so installing a new build does not create per-profile authorization dialogs.
 
-Provider API-key and token environment variables are removed from managed child processes so they cannot silently replace the selected subscription login. `aiwatch` does not infer or print account email addresses.
+Provider API-key and token environment variables are removed from managed child processes so they cannot silently replace the selected subscription login.
+
+Each account card shows the email of the identity that owns its credentials, so a profile signed in to the wrong account is visible at a glance. The email is never configured or guessed: Claude's comes from the OAuth profile endpoint, called with the same token as the quota request and fetched again whenever that token changes; Codex's comes from the usage response; Grok's comes from the credential entry that holds the token. `--json` includes it as `email`.
 
 ## Default credentials
 

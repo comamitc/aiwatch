@@ -1,17 +1,17 @@
-#[cfg(target_os = "macos")]
 use std::{
     collections::HashMap,
+    hash::{BuildHasher, RandomState},
+    path::Path,
+    sync::{Arc, LazyLock, Mutex},
+};
+#[cfg(target_os = "macos")]
+use std::{
     path::PathBuf,
     process::{Command, Stdio},
-    sync::Mutex,
-};
-use std::{
-    path::Path,
-    sync::{Arc, LazyLock},
 };
 
 use chrono::Utc;
-use reqwest::{Client, StatusCode};
+use reqwest::{Client, RequestBuilder, StatusCode};
 use serde::Deserialize;
 use zeroize::Zeroizing;
 
@@ -27,6 +27,7 @@ use super::{
 };
 
 const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
+const PROFILE_URL: &str = "https://api.anthropic.com/api/oauth/profile";
 const FALLBACK_VERSION: &str = "2.1.201";
 #[cfg(target_os = "macos")]
 const SECURITY_COMMAND: &str = "/usr/bin/security";
@@ -36,6 +37,12 @@ const MAX_CREDENTIAL_BYTES: usize = 1024 * 1024;
 #[cfg(target_os = "macos")]
 static MANAGED_AUTH_CACHE: LazyLock<Mutex<HashMap<PathBuf, Arc<Auth>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Profile emails by account id, each paired with a fingerprint of the token that fetched it.
+/// A different token means a different login, so the email is fetched again.
+static PROFILE_EMAILS: LazyLock<Mutex<HashMap<String, (u64, String)>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+static TOKEN_FINGERPRINT: LazyLock<RandomState> = LazyLock::new(RandomState::new);
 
 #[derive(Deserialize)]
 struct Credentials {
@@ -56,6 +63,18 @@ struct OAuth {
 struct Auth {
     token: Zeroizing<String>,
     plan: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ProfileResponse {
+    #[serde(default)]
+    account: Option<ProfileAccount>,
+}
+
+#[derive(Deserialize)]
+struct ProfileAccount {
+    #[serde(default)]
+    email: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -137,14 +156,7 @@ pub async fn fetch(
     account: &AccountConfig,
 ) -> Result<AccountSnapshot, ProviderError> {
     let auth = read_auth(account)?;
-    let response = client
-        .get(USAGE_URL)
-        .header(reqwest::header::USER_AGENT, USER_AGENT.as_str())
-        .header("x-app", "cli")
-        .header("anthropic-version", "2023-06-01")
-        .header("anthropic-beta", "oauth-2025-04-20")
-        .header("anthropic-dangerous-direct-browser-access", "true")
-        .bearer_auth(auth.token.as_str())
+    let response = oauth_get(client, USAGE_URL, auth.token.as_str())
         .send()
         .await
         .map_err(|_| ProviderError::Network)?;
@@ -156,7 +168,54 @@ pub async fn fetch(
     }
     classify_status(response.status(), login_hint(account, "claude auth login"))?;
     let body = response.text().await.map_err(|_| ProviderError::Network)?;
-    map_usage(account, auth.plan.as_deref(), &body)
+    let mut snapshot = map_usage(account, auth.plan.as_deref(), &body)?;
+    snapshot.email = profile_email(client, account, auth.token.as_str()).await;
+    Ok(snapshot)
+}
+
+fn oauth_get(client: &Client, url: &str, token: &str) -> RequestBuilder {
+    client
+        .get(url)
+        .header(reqwest::header::USER_AGENT, USER_AGENT.as_str())
+        .header("x-app", "cli")
+        .header("anthropic-version", "2023-06-01")
+        .header("anthropic-beta", "oauth-2025-04-20")
+        .header("anthropic-dangerous-direct-browser-access", "true")
+        .bearer_auth(token)
+}
+
+/// Asks the provider which identity owns `token`. Returns `None` rather than an error so a
+/// profile outage never hides quota that was already fetched.
+async fn profile_email(client: &Client, account: &AccountConfig, token: &str) -> Option<String> {
+    let fingerprint = TOKEN_FINGERPRINT.hash_one(token);
+    if let Some(email) = cached_profile_email(&account.id, fingerprint) {
+        return Some(email);
+    }
+    let response = oauth_get(client, PROFILE_URL, token).send().await.ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    let email = parse_profile_email(&response.text().await.ok()?)?;
+    if let Ok(mut cache) = PROFILE_EMAILS.lock() {
+        cache.insert(account.id.clone(), (fingerprint, email.clone()));
+    }
+    Some(email)
+}
+
+fn cached_profile_email(account_id: &str, fingerprint: u64) -> Option<String> {
+    let cache = PROFILE_EMAILS.lock().ok()?;
+    cache
+        .get(account_id)
+        .filter(|(cached, _)| *cached == fingerprint)
+        .map(|(_, email)| email.clone())
+}
+
+fn parse_profile_email(body: &str) -> Option<String> {
+    serde_json::from_str::<ProfileResponse>(body)
+        .ok()?
+        .account?
+        .email
+        .filter(|email| !email.trim().is_empty())
 }
 
 fn read_auth(account: &AccountConfig) -> Result<Arc<Auth>, ProviderError> {
@@ -343,6 +402,7 @@ fn map_usage(
         id: account.id.clone(),
         name: account.name.clone(),
         provider: account.provider,
+        email: None,
         plan: plan.map(str::to_owned),
         windows,
         details,
@@ -397,6 +457,36 @@ mod tests {
         assert_eq!(snapshot.windows[0].used_percent, 42.5);
         assert_eq!(snapshot.windows[2].label, "Opus WEEKLY");
         assert_eq!(snapshot.details[0].value, "$12.34");
+    }
+
+    #[test]
+    fn profile_email_comes_from_the_account_object() {
+        assert_eq!(
+            parse_profile_email(
+                r#"{"account":{"email":"person@example.com"},"organization":{"name":"Org"}}"#
+            )
+            .as_deref(),
+            Some("person@example.com")
+        );
+        assert_eq!(parse_profile_email(r#"{"account":{"email":""}}"#), None);
+        assert_eq!(parse_profile_email(r#"{"organization":{}}"#), None);
+        assert_eq!(parse_profile_email("not json"), None);
+    }
+
+    #[test]
+    fn cached_profile_email_is_dropped_when_the_token_changes() {
+        let fingerprint = TOKEN_FINGERPRINT.hash_one("first-token");
+        PROFILE_EMAILS.lock().unwrap().insert(
+            "claude:cache-test".into(),
+            (fingerprint, "first@example.com".into()),
+        );
+
+        assert_eq!(
+            cached_profile_email("claude:cache-test", fingerprint).as_deref(),
+            Some("first@example.com")
+        );
+        let switched = TOKEN_FINGERPRINT.hash_one("second-token");
+        assert_eq!(cached_profile_email("claude:cache-test", switched), None);
     }
 
     #[test]

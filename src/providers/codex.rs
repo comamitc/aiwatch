@@ -49,6 +49,8 @@ struct Auth {
 #[derive(Deserialize)]
 struct UsageResponse {
     #[serde(default)]
+    email: Option<String>,
+    #[serde(default)]
     plan_type: Option<String>,
     #[serde(default)]
     rate_limit: Option<RateLimit>,
@@ -184,6 +186,7 @@ fn map_usage(account: &AccountConfig, body: &str) -> Result<AccountSnapshot, Pro
         id: account.id.clone(),
         name: account.name.clone(),
         provider: account.provider,
+        email: raw.email.filter(|email| !email.trim().is_empty()),
         plan: raw.plan_type,
         windows,
         details,
@@ -232,6 +235,7 @@ mod tests {
         )
         .expect("Codex fixture should map");
 
+        assert_eq!(snapshot.email.as_deref(), Some("coder@example.com"));
         assert_eq!(snapshot.plan.as_deref(), Some("plus"));
         assert_eq!(snapshot.windows.len(), 2);
         assert_eq!(snapshot.windows[0].label, "5H");

@@ -38,6 +38,8 @@ struct AuthEntry {
     #[serde(default)]
     user_id: Option<String>,
     #[serde(default)]
+    email: Option<String>,
+    #[serde(default)]
     refresh_token: Option<String>,
     #[serde(default)]
     expires_at: Option<DateTime<Utc>>,
@@ -55,6 +57,7 @@ struct Auth {
     entry_name: String,
     token: Zeroizing<String>,
     user_id: Option<Zeroizing<String>>,
+    email: Option<String>,
     refresh_token: Option<Zeroizing<String>>,
     expires_at: Option<DateTime<Utc>>,
     oidc_issuer: Option<String>,
@@ -156,7 +159,11 @@ pub async fn fetch(
 
     classify_status(response.status(), login_hint(account, "grok login"))?;
     let body = response.text().await.map_err(|_| ProviderError::Network)?;
-    map_usage(account, &body)
+    let mut snapshot = map_usage(account, &body)?;
+    // The email lives beside the token in the same credential entry, so it always names the
+    // identity whose quota was just fetched.
+    snapshot.email = auth.email;
+    Ok(snapshot)
 }
 
 async fn send_billing_request(client: &Client, auth: &Auth) -> Result<Response, ProviderError> {
@@ -214,6 +221,11 @@ fn read_auth(account: &AccountConfig) -> Result<Auth, ProviderError> {
         entry_name: entry_name.clone(),
         token,
         user_id: entry.user_id.as_ref().cloned().map(Zeroizing::new),
+        email: entry
+            .email
+            .as_ref()
+            .filter(|email| !email.trim().is_empty())
+            .cloned(),
         refresh_token: entry.refresh_token.as_ref().cloned().map(Zeroizing::new),
         expires_at: entry.expires_at,
         oidc_issuer: entry.oidc_issuer.clone(),
@@ -426,6 +438,7 @@ fn map_usage(account: &AccountConfig, body: &str) -> Result<AccountSnapshot, Pro
         id: account.id.clone(),
         name: account.name.clone(),
         provider: account.provider,
+        email: None,
         plan: config.subscription_tier_display,
         windows: vec![window],
         details,
@@ -528,11 +541,30 @@ mod tests {
     }
 
     #[test]
+    fn reads_the_account_email_beside_the_oauth_token() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("auth.json");
+        std::fs::write(
+            &path,
+            r#"{"https://auth.x.ai::user":{"key":"access","email":"person@example.com"}}"#,
+        )
+        .unwrap();
+        let account = AccountConfig {
+            credential_source: CredentialSource::File(path),
+            ..synthetic_account(Provider::Grok)
+        };
+
+        let auth = read_auth(&account).unwrap();
+        assert_eq!(auth.email.as_deref(), Some("person@example.com"));
+    }
+
+    #[test]
     fn refreshes_tokens_in_the_early_expiry_window() {
         let auth = Auth {
             entry_name: "issuer".into(),
             token: Zeroizing::new("access".into()),
             user_id: None,
+            email: None,
             refresh_token: Some(Zeroizing::new("refresh".into())),
             expires_at: Some(Utc::now() + Duration::seconds(REFRESH_EARLY_SECONDS - 1)),
             oidc_issuer: Some("https://auth.x.ai".into()),
