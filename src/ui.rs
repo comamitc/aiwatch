@@ -309,11 +309,19 @@ fn render_overview_body(
             Style::default().fg(YELLOW).bg(BG),
         )));
     }
-    for (index, row) in cards.chunks(columns).enumerate() {
+    let groups = dashboard::card_groups(&cards);
+    if groups.is_empty() {
+        push_card_rows(&mut lines, &cards, columns, card_width);
+    }
+    for (index, (group, run)) in groups.into_iter().enumerate() {
         if index > 0 {
             lines.push(blank_line());
+            lines.push(blank_line());
         }
-        lines.extend(card_row_lines(row, card_width));
+        let row_width = columns * card_width + (columns - 1) * COLUMN_GAP;
+        lines.push(group_heading(group, run.len(), row_width));
+        lines.push(blank_line());
+        push_card_rows(&mut lines, run, columns, card_width);
     }
     frame.render_widget(
         Paragraph::new(lines)
@@ -321,6 +329,36 @@ fn render_overview_body(
             .scroll((state.scroll, 0)),
         area,
     );
+}
+
+fn push_card_rows(
+    lines: &mut Vec<Line<'static>>,
+    cards: &[dashboard::AccountCard<'_>],
+    columns: usize,
+    card_width: usize,
+) {
+    for (index, row) in cards.chunks(columns).enumerate() {
+        if index > 0 {
+            lines.push(blank_line());
+        }
+        lines.extend(card_row_lines(row, card_width));
+    }
+}
+
+/// A full-width rule naming a personal/work group: `personal  ·  3 accounts ─────────`.
+fn group_heading(group: dashboard::ProfileGroup, count: usize, width: usize) -> Line<'static> {
+    let name = group.label().to_string();
+    let detail = format!("  ·  {} ", dashboard::account_count_label(count));
+    let used = name.chars().count() + detail.chars().count();
+    let spans = vec![
+        Span::styled(name, Style::default().fg(FG).add_modifier(Modifier::BOLD)),
+        Span::styled(detail, Style::default().fg(MUTED)),
+        Span::styled(
+            "─".repeat(width.saturating_sub(used)),
+            Style::default().fg(DIM),
+        ),
+    ];
+    Line::from(fit_spans(spans, width))
 }
 
 /// Joins cards side by side, stretching shorter cards so every border in the row lines up.
@@ -1148,8 +1186,40 @@ mod tests {
             .find(|y| buffer_line(&buffer, *y).contains("● claude work"))
             .expect("claude work title");
         let line = buffer_line(&buffer, y);
-        assert!(line.contains("● claude personal"), "{line}");
+        assert!(line.contains("● codex work"), "{line}");
         assert_eq!(line.matches('╭').count(), 2, "{line}");
+    }
+
+    #[test]
+    fn overview_groups_personal_then_work_under_headings() {
+        let text = buffer_text(&draw_overview(160, 60, &AppState::new()));
+        let position = |needle: &str| {
+            text.find(needle)
+                .unwrap_or_else(|| panic!("missing {needle}\n{text}"))
+        };
+        let personal = position("personal  ·  2 accounts");
+        let work = position("work  ·  3 accounts");
+        assert!(personal < work);
+        assert!(personal < position("● claude personal"));
+        assert!(position("● codex personal") < work);
+        for card in ["● claude work", "● codex work", "● grok work"] {
+            assert!(work < position(card), "{card}");
+        }
+    }
+
+    #[test]
+    fn ungrouped_accounts_render_without_headings() {
+        let mut snapshot = DashboardSnapshot::empty();
+        snapshot.accounts.push(AccountSnapshot::empty(
+            "claude:default",
+            "default",
+            Provider::Claude,
+            FetchHealth::ok(),
+        ));
+        let buffer = draw_snapshot(&snapshot, &AppState::new(), 160, 16, Utc::now());
+        let text = buffer_text(&buffer);
+        assert!(text.contains("● claude"));
+        assert!(!text.contains("other  ·"), "{text}");
     }
 
     #[test]

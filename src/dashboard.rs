@@ -51,6 +51,54 @@ impl ProfileFilter {
     }
 }
 
+/// Which side of the personal/work split an account's name puts it on. Declaration order is
+/// display order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ProfileGroup {
+    Personal,
+    Work,
+    Other,
+}
+
+impl ProfileGroup {
+    pub fn of(name: &str) -> Self {
+        if name_has_token(name, "personal") {
+            Self::Personal
+        } else if name_has_token(name, "work") {
+            Self::Work
+        } else {
+            Self::Other
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Personal => "personal",
+            Self::Work => "work",
+            Self::Other => "other",
+        }
+    }
+}
+
+/// Splits cards, already ordered by group, into one run per group. Returns no runs when no card
+/// is personal or work, so ungrouped setups render without headings.
+pub fn card_groups<'c, 'a>(
+    cards: &'c [AccountCard<'a>],
+) -> Vec<(ProfileGroup, &'c [AccountCard<'a>])> {
+    if cards.iter().all(|card| card.group == ProfileGroup::Other) {
+        return Vec::new();
+    }
+    cards
+        .chunk_by(|left, right| left.group == right.group)
+        .map(|run| (run[0].group, run))
+        .collect()
+}
+
+pub fn account_count_label(count: usize) -> String {
+    let accounts = if count == 1 { "account" } else { "accounts" };
+    format!("{count} {accounts}")
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ColumnLayout {
     pub accent: usize,
@@ -186,12 +234,15 @@ pub fn visible_accounts(
     provider: Option<Provider>,
     profile: ProfileFilter,
 ) -> Vec<&AccountSnapshot> {
-    snapshot
+    let mut accounts = snapshot
         .accounts
         .iter()
         .filter(|account| provider.is_none_or(|filter| account.provider == filter))
         .filter(|account| account_matches_profile(&account.name, profile))
-        .collect()
+        .collect::<Vec<_>>();
+    // Stable, so accounts keep their provider and name order within each group.
+    accounts.sort_by_key(|account| ProfileGroup::of(&account.name));
+    accounts
 }
 
 pub fn window_is_weekly_view(window: &UsageWindow, weekly_only: bool) -> bool {
@@ -413,6 +464,7 @@ pub struct CardMeter {
 #[derive(Debug, Clone)]
 pub struct AccountCard<'a> {
     pub account: &'a AccountSnapshot,
+    pub group: ProfileGroup,
     pub title: String,
     pub account_name: Option<String>,
     pub email: Option<String>,
@@ -493,6 +545,7 @@ pub fn account_card<'a>(
     };
     AccountCard {
         account,
+        group: ProfileGroup::of(&account.name),
         title: account.provider.key().to_string(),
         account_name: card_account_name(account),
         email: account
@@ -679,10 +732,25 @@ pub fn render_text(
         output.push('\n');
         return output;
     }
-    for card in &cards {
+    let groups = card_groups(&cards);
+    if groups.is_empty() {
+        for card in &cards {
+            output.push('\n');
+            output.push_str(&render_card_text(card, width));
+            output.push('\n');
+        }
+        return output;
+    }
+    for (group, run) in groups {
         output.push('\n');
-        output.push_str(&render_card_text(card, width));
+        let heading = format!("{}  ·  {}", group.label(), account_count_label(run.len()));
+        output.push_str(&fit_line(&heading, width));
         output.push('\n');
+        for card in run {
+            output.push('\n');
+            output.push_str(&render_card_text(card, width));
+            output.push('\n');
+        }
     }
     output
 }
@@ -1081,6 +1149,9 @@ mod tests {
         assert!(account_matches_profile("other", ProfileFilter::All));
         assert!(!account_matches_profile("other", ProfileFilter::Personal));
         assert!(!account_matches_profile("other", ProfileFilter::Work));
+        assert_eq!(ProfileGroup::of("personal"), ProfileGroup::Personal);
+        assert_eq!(ProfileGroup::of("work-2"), ProfileGroup::Work);
+        assert_eq!(ProfileGroup::of("default"), ProfileGroup::Other);
     }
 
     #[test]
